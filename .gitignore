@@ -1,4 +1,5 @@
 node_modules/
 dist/
 article-library/
+文章库/
 .wechat-reader-profile/

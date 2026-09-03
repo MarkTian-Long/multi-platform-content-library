@@ -1,7 +1,7 @@
 import path from "node:path";
 
 export function resolveLibraryRoot(workspaceRoot: string): string {
-  return path.resolve(workspaceRoot, "article-library");
+  return path.resolve(workspaceRoot, "文章库");
 }
 
 export function resolveRuntimeRoot(

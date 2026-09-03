@@ -3,6 +3,7 @@ import { validateArticleUrl } from "../url-policy.js";
 import { saveArticle, findArticles, readArticle, type ArticleMetadata } from "../article-library.js";
 import { openEdgePage } from "../browser/edge.js";
 import { captureRenderedPage } from "../browser/capture-page.js";
+import { migrateLegacyLibrary } from "../migrate-legacy-library.js";
 import type { CaptureStatus } from "../article.js";
 
 export type CaptureResult = { status: CaptureStatus; articleId?: string; title?: string; reason?: string };
@@ -15,7 +16,10 @@ export type HandlerDeps = {
 const runtimeRoot = () => resolveRuntimeRoot();
 const libraryRoot = () => resolveLibraryRoot(runtimeRoot());
 
+async function ensureLegacyArticlesAreVisible(): Promise<void> { await migrateLegacyLibrary(runtimeRoot()); }
+
 async function defaultCapture(url: string): Promise<CaptureResult> {
+  await ensureLegacyArticlesAreVisible();
   const { context, page } = await openEdgePage(runtimeRoot());
   try {
     const record = await captureRenderedPage(page, url);
@@ -33,9 +37,11 @@ export async function captureWechatArticle(input: { url: string }, deps: Handler
 }
 
 export async function findSavedArticles(input: { query: string }, deps: HandlerDeps = {}): Promise<ArticleMetadata[]> {
+  if (!deps.find) await ensureLegacyArticlesAreVisible();
   return (deps.find ?? ((query) => findArticles(libraryRoot(), query)))(input.query);
 }
 
 export async function readSavedArticle(input: { articleId: string }, deps: HandlerDeps = {}) {
+  if (!deps.read) await ensureLegacyArticlesAreVisible();
   return (deps.read ?? ((articleId) => readArticle(libraryRoot(), articleId)))(input.articleId);
 }

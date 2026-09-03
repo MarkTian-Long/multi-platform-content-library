@@ -1,4 +1,5 @@
 export type CaptureStatus = "complete" | "partial" | "empty" | "restricted" | "timeout" | "failed";
+export interface ArticleImage { index: number; sourceUrl: string; alt?: string; }
 
 export interface ArticleRecord {
   title: string;
@@ -10,4 +11,5 @@ export interface ArticleRecord {
   status: CaptureStatus;
   error?: string;
   sourceHtml?: string;
+  images?: ArticleImage[];
 }

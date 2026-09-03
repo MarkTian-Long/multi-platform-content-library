@@ -16,6 +16,8 @@ test("turns visible article content into safe Markdown", () => {
   assert.equal(article.sourceUrl, validUrl);
   assert.equal(article.extractedAt, fixedTime.toISOString());
   assert.doesNotMatch(article.markdown, /window\.location|javascript:/);
+  assert.deepEqual(article.images, [{ index: 1, sourceUrl: "https://example.com/image.png", alt: "示例图片" }]);
+  assert.match(article.markdown, /!\[示例图片\]\(https:\/\/example\.com\/image\.png\)/);
 });
 
 test("marks empty content as empty without pretending there is a body", () => {

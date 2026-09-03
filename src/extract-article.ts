@@ -28,7 +28,13 @@ export function extractRenderedArticle(html: string, sourceUrl: string, extracte
       $(node).replaceWith($(node).text());
     }
   });
+  const images = content.find("img").toArray().flatMap((node, offset) => {
+    const source = ["data-src", "data-original", "data-actualsrc", "src"].map((key) => $(node).attr(key) ?? "").find((value) => /^https?:\/\//i.test(value));
+    if (!source) return [];
+    $(node).attr("src", source).removeAttr("data-src").removeAttr("data-original").removeAttr("data-actualsrc");
+    return [{ index: offset + 1, sourceUrl: source, alt: $(node).attr("alt")?.trim() || undefined }];
+  });
   const service = new TurndownService({ headingStyle: "atx", bulletListMarker: "-" });
   const markdown = service.turndown(content.html() ?? "").replace(/\n{3,}/g, "\n\n").trim();
-  return { title, author, publishedAt, markdown, sourceUrl, extractedAt: timestamp, status: markdown ? (title === "未命名文章" ? "partial" : "complete") : "empty" };
+  return { title, author, publishedAt, markdown, sourceUrl, extractedAt: timestamp, status: markdown ? (title === "未命名文章" ? "partial" : "complete") : "empty", images };
 }
