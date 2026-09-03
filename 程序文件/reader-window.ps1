@@ -24,6 +24,8 @@ function Invoke-ReaderCli([string[]]$Arguments) {
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
+  $psi.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
   $psi.CreateNoWindow = $true
   $process = New-Object System.Diagnostics.Process
   $process.StartInfo = $psi
@@ -43,7 +45,7 @@ $urlBox.Location = New-Object System.Drawing.Point(24, 44)
 $urlBox.Size = New-Object System.Drawing.Size(630, 30)
 $form.Controls.Add($urlBox)
 $readButton = New-Object System.Windows.Forms.Button
-$readButton.Text = "读取并生成 PDF"
+$readButton.Text = "读取并生成 MD 和 PDF"
 $readButton.Location = New-Object System.Drawing.Point(24, 86)
 $readButton.Size = New-Object System.Drawing.Size(150, 36)
 $form.Controls.Add($readButton)
@@ -76,12 +78,6 @@ $openFolderButton.Text = "打开文章库"
 $openFolderButton.Location = New-Object System.Drawing.Point(148, 385)
 $openFolderButton.Size = New-Object System.Drawing.Size(120, 36)
 $form.Controls.Add($openFolderButton)
-$pdfButton = New-Object System.Windows.Forms.Button
-$pdfButton.Text = "重新生成 PDF"
-$pdfButton.Location = New-Object System.Drawing.Point(282, 385)
-$pdfButton.Size = New-Object System.Drawing.Size(140, 36)
-$pdfButton.Enabled = $false
-$form.Controls.Add($pdfButton)
 $status = New-Object System.Windows.Forms.Label
 $status.Text = "就绪：粘贴链接读取，或在下方搜索历史文章。"
 $status.Location = New-Object System.Drawing.Point(24, 438)
@@ -105,10 +101,9 @@ $worker.add_RunWorkerCompleted({ param($sender, $eventArgs); $readButton.Enabled
 $readButton.add_Click({ $url = $urlBox.Text.Trim(); if (-not $url) { $status.Text = "请先粘贴公众号文章链接。"; return }; if ($worker.IsBusy) { return }; $status.Text = "正在读取文章并生成 PDF，请稍候…"; $readButton.Enabled = $false; $worker.RunWorkerAsync($url) })
 $searchButton.add_Click({ Refresh-Library })
 $searchBox.add_KeyDown({ if ($_.KeyCode -eq [Windows.Forms.Keys]::Enter) { Refresh-Library } })
-$list.add_SelectedIndexChanged({ $enabled = $null -ne $list.SelectedItem; $openArticleButton.Enabled = $enabled; $pdfButton.Enabled = $enabled })
+$list.add_SelectedIndexChanged({ $openArticleButton.Enabled = $null -ne $list.SelectedItem })
 $openArticleButton.add_Click({ if ($list.SelectedItem) { $article = $list.SelectedItem; $directory = Join-Path $libraryRoot ((Get-ChildItem $libraryRoot -Directory | Where-Object { (Get-Content -Raw (Join-Path $_.FullName "manifest.json") | ConvertFrom-Json).articleId -eq $article.ArticleId }).Name); $markdown = Get-ChildItem -LiteralPath $directory -Filter '*.md' -File | Select-Object -First 1; if ($markdown) { Start-Process $markdown.FullName } } })
 $openFolderButton.add_Click({ if (Test-Path $libraryRoot) { Start-Process explorer.exe -ArgumentList ('"{0}"' -f $libraryRoot) } else { $status.Text = "文章库将在首次成功读取后创建。" } })
-$pdfButton.add_Click({ if ($list.SelectedItem) { $result = Invoke-ReaderCli @("regenerate-pdf", $list.SelectedItem.ArticleId); $status.Text = $result.message } })
 
 Refresh-Library
 [void]$form.ShowDialog()
