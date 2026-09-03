@@ -1,4 +1,4 @@
-param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+﻿param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
