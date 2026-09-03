@@ -7,7 +7,10 @@ export async function captureRenderedPage(page: RenderedPage, url: string, extra
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForSelector("#js_content", { state: "visible", timeout: 30000 });
-    return extractRenderedArticle(await page.content(), url, extractedAt);
+    const html = await page.content();
+    const article = extractRenderedArticle(html, url, extractedAt);
+    article.sourceHtml = html;
+    return article;
   } catch (error) {
     const reason = error instanceof Error ? error.message : "页面加载失败";
     return { title: "未命名文章", markdown: "", sourceUrl: url, extractedAt: extractedAt.toISOString(), status: /timeout/i.test(reason) ? "timeout" : "failed", error: /timeout/i.test(reason) ? "页面加载超时" : "页面无法读取" };

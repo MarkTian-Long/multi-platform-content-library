@@ -7,7 +7,7 @@ export function validateArticleUrl(input: string): UrlValidation {
   try {
     const url = new URL(input);
     if (url.protocol !== "https:") return { ok: false, reason: "只支持 HTTPS 链接" };
-    if (url.hostname !== "mp.weixin.qq.com") return { ok: false, reason: "只支持 mp.weixin.qq.com 文章链接" };
+    if (url.hostname !== "mp.weixin.qq.com") return { ok: false, reason: "只支持 mp.weixin.qq.com 微信公众号文章链接" };
     if (url.pathname === "/" || url.pathname.length < 2) return { ok: false, reason: "链接缺少文章路径" };
     return { ok: true, url };
   } catch {
