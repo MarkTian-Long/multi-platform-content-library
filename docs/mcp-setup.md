@@ -21,3 +21,5 @@ cmd /c npm run build
 ```
 
 服务只提供 `capture_wechat_article`、`find_saved_articles` 和 `read_saved_article` 三个工具。
+
+在 Codex 中注册时，必须设置 `WECHAT_ARTICLE_READER_ROOT` 为本项目的绝对路径。这样文章库与专用 Edge 资料都会保留在项目目录，而不会随 MCP 的启动位置变化。

@@ -1,4 +1,4 @@
-import { resolveLibraryRoot } from "../config.js";
+import { resolveLibraryRoot, resolveRuntimeRoot } from "../config.js";
 import { validateArticleUrl } from "../url-policy.js";
 import { saveArticle, findArticles, readArticle, type ArticleMetadata } from "../article-library.js";
 import { openEdgePage } from "../browser/edge.js";
@@ -12,10 +12,11 @@ export type HandlerDeps = {
   read?: (articleId: string) => ReturnType<typeof readArticle>;
 };
 
-const libraryRoot = () => resolveLibraryRoot(process.cwd());
+const runtimeRoot = () => resolveRuntimeRoot();
+const libraryRoot = () => resolveLibraryRoot(runtimeRoot());
 
 async function defaultCapture(url: string): Promise<CaptureResult> {
-  const { context, page } = await openEdgePage(process.cwd());
+  const { context, page } = await openEdgePage(runtimeRoot());
   try {
     const record = await captureRenderedPage(page, url);
     if (!record.markdown || !["complete", "partial"].includes(record.status)) return { status: record.status, title: record.title, reason: record.error ?? "未提取到正文" };
