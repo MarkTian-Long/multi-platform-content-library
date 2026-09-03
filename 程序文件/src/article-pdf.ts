@@ -3,7 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import * as cheerio from "cheerio";
 import { chromium } from "playwright-core";
-import type { ArticleManifest } from "./article-library.js";
+import { articleFileName, type ArticleManifest } from "./article-library.js";
 import { resolveEdgeExecutable } from "./url-policy.js";
 
 export type PdfStatus = { status: "saved"; path: string } | { status: "failed"; reason: string };
@@ -54,8 +54,9 @@ async function defaultPdfGenerator(html: string): Promise<Uint8Array> {
 export async function generateArticlePdf(directory: string, manifest: ArticleManifest, generator: PdfGenerator = defaultPdfGenerator): Promise<PdfStatus> {
   try {
     const html = await embedLocalImages(buildPdfHtml(await fs.readFile(path.join(directory, "source.html"), "utf8"), manifest, directory), manifest, directory);
-    const output = path.join(directory, "文章.pdf");
+    const fileName = articleFileName(manifest.title, "pdf");
+    const output = path.join(directory, fileName);
     await fs.writeFile(output, await generator(html));
-    return { status: "saved", path: "文章.pdf" };
+    return { status: "saved", path: fileName };
   } catch (error) { return { status: "failed", reason: error instanceof Error ? error.message : "PDF 生成失败" }; }
 }

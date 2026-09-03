@@ -106,7 +106,7 @@ $readButton.add_Click({ $url = $urlBox.Text.Trim(); if (-not $url) { $status.Tex
 $searchButton.add_Click({ Refresh-Library })
 $searchBox.add_KeyDown({ if ($_.KeyCode -eq [Windows.Forms.Keys]::Enter) { Refresh-Library } })
 $list.add_SelectedIndexChanged({ $enabled = $null -ne $list.SelectedItem; $openArticleButton.Enabled = $enabled; $pdfButton.Enabled = $enabled })
-$openArticleButton.add_Click({ if ($list.SelectedItem) { $article = $list.SelectedItem; $payload = Invoke-ReaderCli @("list", ""); $match = @($payload.articles | Where-Object articleId -eq $article.ArticleId)[0]; if ($match) { $directory = Join-Path $libraryRoot ((Get-ChildItem $libraryRoot -Directory | Where-Object { (Get-Content -Raw (Join-Path $_.FullName "manifest.json") | ConvertFrom-Json).articleId -eq $article.ArticleId }).Name); Start-Process (Join-Path $directory "article.md") } } })
+$openArticleButton.add_Click({ if ($list.SelectedItem) { $article = $list.SelectedItem; $directory = Join-Path $libraryRoot ((Get-ChildItem $libraryRoot -Directory | Where-Object { (Get-Content -Raw (Join-Path $_.FullName "manifest.json") | ConvertFrom-Json).articleId -eq $article.ArticleId }).Name); $markdown = Get-ChildItem -LiteralPath $directory -Filter '*.md' -File | Select-Object -First 1; if ($markdown) { Start-Process $markdown.FullName } } })
 $openFolderButton.add_Click({ if (Test-Path $libraryRoot) { Start-Process explorer.exe -ArgumentList ('"{0}"' -f $libraryRoot) } else { $status.Text = "文章库将在首次成功读取后创建。" } })
 $pdfButton.add_Click({ if ($list.SelectedItem) { $result = Invoke-ReaderCli @("regenerate-pdf", $list.SelectedItem.ArticleId); $status.Text = $result.message } })
 

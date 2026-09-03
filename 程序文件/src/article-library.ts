@@ -8,13 +8,17 @@ import { isPathWithin } from "./url-policy.js";
 import { renderArticleMarkdown } from "./markdown.js";
 
 export interface ArticleMetadata { articleId: string; title: string; sourceUrl: string; status: CaptureStatus; extractedAt: string; }
-export interface ArticleManifest extends ArticleMetadata { contentHash: string; images?: SavedArticleImage[]; pdf?: PdfStatus; }
+export interface ArticleManifest extends ArticleMetadata { contentHash: string; images?: SavedArticleImage[]; pdf?: PdfStatus; markdownFile?: string; }
 export interface SaveArticleOptions { fetcher?: ImageFetcher; }
 
 export function articleDirectoryName(record: Pick<ArticleRecord, "title" | "extractedAt">, copy = 1): string {
   const date = record.extractedAt.slice(0, 10);
   const title = record.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "").replace(/[. ]+$/g, "").slice(0, 48) || "未命名文章";
   return `${date}_${title}${copy > 1 ? `（${copy}）` : ""}`;
+}
+export function articleFileName(title: string, extension: "md" | "pdf"): string {
+  const safeTitle = title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "").replace(/[. ]+$/g, "").slice(0, 80) || "未命名文章";
+  return `${safeTitle}.${extension}`;
 }
 
 function idFor(record: ArticleRecord): { id: string; contentHash: string } {
@@ -52,10 +56,11 @@ export async function saveArticle(root: string, record: ArticleRecord, options: 
   try {
     await fs.mkdir(temp);
     const images = await downloadArticleImages(record.images, imagesDirectory, options.fetcher);
-    const manifest: ArticleManifest = { articleId: id, title: record.title, sourceUrl: record.sourceUrl, status: record.status, extractedAt: record.extractedAt, contentHash, images };
+    const manifest: ArticleManifest = { articleId: id, title: record.title, sourceUrl: record.sourceUrl, status: record.status, extractedAt: record.extractedAt, contentHash, images, markdownFile: articleFileName(record.title, "md") };
     const localRecord = withLocalImageLinks(record, images);
+    const markdownFile = manifest.markdownFile;
     await Promise.all([
-      fs.writeFile(path.join(temp, "article.md"), renderArticleMarkdown(localRecord), "utf8"),
+      fs.writeFile(path.join(temp, markdownFile), renderArticleMarkdown(localRecord), "utf8"),
       fs.writeFile(path.join(temp, "source.html"), record.sourceHtml ?? "", "utf8"),
       fs.writeFile(path.join(temp, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8")
     ]);
@@ -80,4 +85,4 @@ async function records(root: string): Promise<Array<{ directory: string; manifes
 
 export async function findArticles(root: string, query: string): Promise<ArticleMetadata[]> { const needle = query.toLowerCase(); return (await records(root)).map(({ manifest }) => manifest).filter((item) => !needle || `${item.title} ${item.sourceUrl}`.toLowerCase().includes(needle)); }
 export async function findArticleDirectory(root: string, articleId: string): Promise<string | undefined> { return (await records(root)).find(({ manifest }) => manifest.articleId === articleId)?.directory; }
-export async function readArticle(root: string, articleId: string): Promise<{ ok: true; markdown: string; manifest: ArticleManifest } | { ok: false; reason: string }> { if (!/^[a-f0-9]{24}$/.test(articleId)) return { ok: false, reason: "文章标识无效" }; const found = (await records(root)).find(({ manifest }) => manifest.articleId === articleId); if (!found) return { ok: false, reason: "文章记录不存在或不完整" }; try { return { ok: true, markdown: await fs.readFile(path.join(found.directory, "article.md"), "utf8"), manifest: found.manifest }; } catch { return { ok: false, reason: "文章记录不存在或不完整" }; } }
+export async function readArticle(root: string, articleId: string): Promise<{ ok: true; markdown: string; manifest: ArticleManifest } | { ok: false; reason: string }> { if (!/^[a-f0-9]{24}$/.test(articleId)) return { ok: false, reason: "文章标识无效" }; const found = (await records(root)).find(({ manifest }) => manifest.articleId === articleId); if (!found) return { ok: false, reason: "文章记录不存在或不完整" }; try { return { ok: true, markdown: await fs.readFile(path.join(found.directory, found.manifest.markdownFile ?? "article.md"), "utf8"), manifest: found.manifest }; } catch { return { ok: false, reason: "文章记录不存在或不完整" }; } }
