@@ -21,7 +21,7 @@ export async function migrateLegacyLibrary(projectRoot: string): Promise<Migrati
       if (!/^[a-f0-9]{24}$/.test(manifest.articleId) || !manifest.title || !manifest.extractedAt) { result.skipped += 1; continue; }
       await fs.access(path.join(source, "article.md"));
       const record = { title: manifest.title, extractedAt: manifest.extractedAt } as ArticleRecord;
-      const target = path.resolve(targetRoot, articleDirectoryName(record, manifest.articleId));
+      const target = path.resolve(targetRoot, articleDirectoryName(record));
       if (!isPathWithin(targetRoot, target)) { result.skipped += 1; continue; }
       try {
         await fs.access(target);

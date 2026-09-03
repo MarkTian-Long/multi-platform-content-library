@@ -14,7 +14,7 @@ test("copies valid legacy records into readable Chinese article folders without 
     articleId: "b758e4d800cb74b5fd3ce525", title: "旧文章：可读目录", sourceUrl: "https://mp.weixin.qq.com/s/example", status: "complete", extractedAt: "2026-09-03T00:00:00.000Z", contentHash: "abc"
   }), "utf8");
   assert.deepEqual(await migrateLegacyLibrary(root), { migrated: 1, skipped: 0, errors: 0 });
-  assert.equal(await fs.readFile(path.join(root, "文章库", "2026-09-03_旧文章：可读目录_b758e4d8", "article.md"), "utf8"), "# 旧文章\n");
+  assert.equal(await fs.readFile(path.join(root, "文章库", "2026-09-03_旧文章：可读目录", "article.md"), "utf8"), "# 旧文章\n");
   assert.equal(await fs.readFile(path.join(legacy, "article.md"), "utf8"), "# 旧文章\n");
   assert.deepEqual(await migrateLegacyLibrary(root), { migrated: 0, skipped: 1, errors: 0 });
 });
