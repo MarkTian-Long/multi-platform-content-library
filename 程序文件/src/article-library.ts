@@ -58,7 +58,7 @@ export async function saveArticle(root: string, record: ArticleRecord, options: 
     const images = await downloadArticleImages(record.images, imagesDirectory, options.fetcher);
     const manifest: ArticleManifest = { articleId: id, title: record.title, sourceUrl: record.sourceUrl, status: record.status, extractedAt: record.extractedAt, contentHash, images, markdownFile: articleFileName(record.title, "md") };
     const localRecord = withLocalImageLinks(record, images);
-    const markdownFile = manifest.markdownFile;
+    const markdownFile = articleFileName(record.title, "md");
     await Promise.all([
       fs.writeFile(path.join(temp, markdownFile), renderArticleMarkdown(localRecord), "utf8"),
       fs.writeFile(path.join(temp, "source.html"), record.sourceHtml ?? "", "utf8"),
