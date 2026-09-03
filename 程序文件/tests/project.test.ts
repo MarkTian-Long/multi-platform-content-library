@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { resolveLibraryRoot, resolveRuntimeRoot } from "../src/config.js";
 
 test("uses an app-owned article library below the current workspace", () => {
-  assert.match(resolveLibraryRoot("D:/work/app"), /D:[\\/]work[\\/]app[\\/]文章库$/);
+  assert.match(resolveLibraryRoot("D:/work/app/程序文件"), /D:[\\/]work[\\/]app[\\/]文章库$/);
 });
 
 test("uses the configured reader root instead of the MCP process directory", () => {

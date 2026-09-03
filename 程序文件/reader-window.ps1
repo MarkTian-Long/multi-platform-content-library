@@ -18,8 +18,9 @@ function Invoke-ReaderCli([string[]]$Arguments) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = "node.exe"
   $quoted = $Arguments | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }
-  $psi.Arguments = ('"{0}" {1}' -f (Join-Path $ProjectRoot "dist\cli.js"), ($quoted -join ' '))
-  $psi.WorkingDirectory = $ProjectRoot
+  $programRoot = Join-Path $ProjectRoot "程序文件"
+  $psi.Arguments = ('"{0}" {1}' -f (Join-Path $programRoot "dist\cli.js"), ($quoted -join ' '))
+  $psi.WorkingDirectory = $programRoot
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true

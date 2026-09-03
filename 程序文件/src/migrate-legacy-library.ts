@@ -2,14 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ArticleRecord } from "./article.js";
 import { articleDirectoryName, type ArticleManifest } from "./article-library.js";
-import { resolveLibraryRoot } from "./config.js";
 import { isPathWithin } from "./url-policy.js";
 
 export type MigrationResult = { migrated: number; skipped: number; errors: number };
 
 export async function migrateLegacyLibrary(projectRoot: string): Promise<MigrationResult> {
   const legacyRoot = path.resolve(projectRoot, "article-library");
-  const targetRoot = resolveLibraryRoot(projectRoot);
+  const targetRoot = path.resolve(projectRoot, "文章库");
   const entries = await fs.readdir(legacyRoot, { withFileTypes: true }).catch(() => []);
   const result: MigrationResult = { migrated: 0, skipped: 0, errors: 0 };
   for (const entry of entries) {

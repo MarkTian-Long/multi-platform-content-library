@@ -1,5 +1,4 @@
-node_modules/
-dist/
-article-library/
+程序文件/node_modules/
+程序文件/dist/
+程序文件/.wechat-reader-profile/
 文章库/
-.wechat-reader-profile/
