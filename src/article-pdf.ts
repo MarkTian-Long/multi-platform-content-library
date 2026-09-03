@@ -24,6 +24,24 @@ export function buildPdfHtml(sourceHtml: string, manifest: ArticleManifest, arti
   return `<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:"Microsoft YaHei",sans-serif;max-width:760px;margin:40px auto;line-height:1.75;color:#202124}h1{line-height:1.35}img{display:block;max-width:100%;height:auto;margin:18px auto}pre,blockquote{white-space:pre-wrap;background:#f6f8fa;padding:12px;border-left:4px solid #9aa0a6}a{color:#2463b8}footer{margin-top:30px;color:#666;font-size:12px}</style></head><body><h1>${manifest.title}</h1><p>来源：${manifest.sourceUrl}</p>${content.html() ?? ""}<footer>本地保存时间：${manifest.extractedAt}</footer></body></html>`;
 }
 
+async function embedLocalImages(html: string, manifest: ArticleManifest, articleDirectory: string): Promise<string> {
+  const $ = cheerio.load(html);
+  for (const image of manifest.images ?? []) {
+    if (image.status !== "saved" || !image.localPath) continue;
+    try {
+      const bytes = await fs.readFile(path.join(articleDirectory, image.localPath));
+      const extension = path.extname(image.localPath).slice(1).toLowerCase() || "png";
+      const mime = extension === "jpg" ? "jpeg" : extension;
+      $("img").each((_, node) => {
+        const element = $(node);
+        const candidates = ["data-src", "data-original", "data-actualsrc", "src"].map((key) => element.attr(key));
+        if (candidates.includes(image.sourceUrl)) element.attr("src", `data:image/${mime};base64,${bytes.toString("base64")}`);
+      });
+    } catch { /* keep the original image reference if local evidence is unavailable */ }
+  }
+  return $.html();
+}
+
 async function defaultPdfGenerator(html: string): Promise<Uint8Array> {
   const browser = await chromium.launch({ executablePath: resolveEdgeExecutable(), headless: true });
   try {
@@ -35,7 +53,7 @@ async function defaultPdfGenerator(html: string): Promise<Uint8Array> {
 
 export async function generateArticlePdf(directory: string, manifest: ArticleManifest, generator: PdfGenerator = defaultPdfGenerator): Promise<PdfStatus> {
   try {
-    const html = buildPdfHtml(await fs.readFile(path.join(directory, "source.html"), "utf8"), manifest, directory);
+    const html = await embedLocalImages(buildPdfHtml(await fs.readFile(path.join(directory, "source.html"), "utf8"), manifest, directory), manifest, directory);
     const output = path.join(directory, "文章.pdf");
     await fs.writeFile(output, await generator(html));
     return { status: "saved", path: "文章.pdf" };

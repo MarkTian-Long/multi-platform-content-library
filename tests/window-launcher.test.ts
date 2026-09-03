@@ -8,5 +8,8 @@ test("ships a double-click launcher without clipboard or background monitoring",
   assert.match(command, /reader-window\.ps1/);
   assert.match(window, /公众号文章阅读器/);
   assert.match(window, /dist\\cli\.js/);
+  assert.match(window, /搜索已保存文章/);
+  assert.match(window, /读取并生成 PDF/);
+  assert.match(window, /regenerate-pdf/);
   assert.doesNotMatch(window, /Get-Clipboard|Register-HotKey|NotifyIcon/);
 });
