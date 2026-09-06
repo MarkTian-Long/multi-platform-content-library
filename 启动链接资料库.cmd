@@ -24,9 +24,9 @@ if not exist "%PROJECT_ROOT%程序文件\dist\link-cli.js" (
   pause
   exit /b 1
 )
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%程序文件\link-window.ps1" -ProjectRoot "%PROJECT_ROOT%"
+start "" powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%PROJECT_ROOT%程序文件\link-window.ps1"
 if errorlevel 1 (
-  echo 链接资料库未能启动。请检查 Node.js、程序构建和 logs\link-window.log。
+  echo 无法创建链接资料库窗口进程，请检查 Windows PowerShell 是否可用。
   pause
 )
 endlocal

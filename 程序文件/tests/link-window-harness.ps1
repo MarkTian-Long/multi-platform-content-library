@@ -60,6 +60,28 @@ process.stdout.write(JSON.stringify({ ok: false, message: '未知命令' }));
 [IO.File]::WriteAllText((Join-Path $tempProgram 'dist\link-cli.js'), $fakeCli, (New-Object Text.UTF8Encoding($false)))
 
 function Assert-Window([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+function Assert-QueueControlsAccessible([string]$SizeName) {
+  $form.PerformLayout()
+  $queueGroup.PerformLayout()
+  [Windows.Forms.Application]::DoEvents()
+  $problems = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($control in @($cancelButton, $retryButton, $queueStatus)) {
+    $label = [string]$control.Text
+    if ($control.Parent -ne $queueGroup) { $problems.Add("$label 的 Parent 不是任务队列") }
+    if (-not $queueGroup.ClientRectangle.Contains($control.Bounds)) { $problems.Add("$label 超出任务队列边界：$($control.Bounds)") }
+    if (-not $control.Visible) { $problems.Add("$label 不可见") }
+    $center = New-Object Drawing.Point([int]($control.Width / 2), [int]($control.Height / 2))
+    $screenPoint = $control.PointToScreen($center)
+    $hit = $form
+    while ($null -ne $hit) {
+      $child = $hit.GetChildAtPoint($hit.PointToClient($screenPoint), [Windows.Forms.GetChildAtPointSkip]::Invisible)
+      if ($null -eq $child) { break }
+      $hit = $child
+    }
+    if ($hit -ne $control) { $problems.Add("$label 中心点被其他控件遮挡，命中：$($hit.GetType().Name)/$($hit.Text)") }
+  }
+  Assert-Window ($problems.Count -eq 0) ("任务队列控件在${SizeName}不可访问：" + ($problems -join '；'))
+}
 function Wait-WindowOperation {
   $deadline = [DateTime]::UtcNow.AddSeconds(20)
   while (($script:linkJob -or $script:linkWorkJob -or $script:linkPollJob) -and [DateTime]::UtcNow -lt $deadline) {
@@ -76,6 +98,16 @@ try {
   Assert-Window ($PSVersionTable.PSVersion.Major -eq 5) '必须使用 Windows PowerShell 5.1'
   Assert-Window ($form.Text -eq '链接资料库') '窗口标题不正确'
   Assert-Window ($form.ClientSize.Width -ge 1100 -and $form.ClientSize.Height -ge 740) '默认窗口尺寸不足'
+  # Real child handles and native hit tests are required: reflected OnClick succeeds even behind a GroupBox.
+  $form.ShowInTaskbar = $false
+  $form.StartPosition = 'Manual'
+  $form.Location = New-Object Drawing.Point(-32000, -32000)
+  $form.Show()
+  $defaultSize = $form.Size
+  Assert-QueueControlsAccessible '默认尺寸'
+  $form.Size = $form.MinimumSize
+  Assert-QueueControlsAccessible '最小尺寸'
+  $form.Size = $defaultSize
   Assert-Window ($queueList.Items.Count -eq 0) '初始任务列表不为空'
   $inputBox.Text = '测试资料 https://example.com/a'
   [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($enqueueButton, @([EventArgs]::Empty)) | Out-Null
@@ -113,7 +145,7 @@ try {
   Assert-Window (@($calls | Where-Object { $_.command -eq 'export' }).Count -eq 1) '导出按钮没有调用 export <id>'
   $form.ClientSize = New-Object Drawing.Size(1400, 900)
   Assert-Window ($libraryList.Width -gt 500 -and $libraryList.Height -gt 180) '资料列表没有随窗口拉伸'
-  [pscustomobject]@{ok=$true;version=$PSVersionTable.PSVersion.ToString();checks=12} | ConvertTo-Json -Compress
+  [pscustomobject]@{ok=$true;version=$PSVersionTable.PSVersion.ToString();checks=14} | ConvertTo-Json -Compress
 } finally {
   if ($script:linkJob) { try { Stop-ReaderProcess $script:linkJob } catch {} }
   if ($linkTimer) { $linkTimer.Dispose() }

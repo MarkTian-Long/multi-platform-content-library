@@ -1,14 +1,30 @@
-﻿param([Parameter(Mandatory = $true)][string]$ProjectRoot, [switch]$NoShow)
+﻿param([string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot), [switch]$NoShow)
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[Windows.Forms.Application]::EnableVisualStyles()
-. (Join-Path $PSScriptRoot 'reader-process.ps1')
+$ErrorActionPreference = 'Stop'
+$startupStage = '初始化窗口'
+try {
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+  [Windows.Forms.Application]::EnableVisualStyles()
+  . (Join-Path $PSScriptRoot 'reader-process.ps1')
 
-$ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
-$programRoot = Join-Path $ProjectRoot '程序文件'
-$configuredContentRoot = [string]$env:CONTENT_LIBRARY_ROOT
-$libraryRoot = if ($configuredContentRoot -and [IO.Path]::IsPathRooted($configuredContentRoot)) { [IO.Path]::GetFullPath($configuredContentRoot) } else { Join-Path $ProjectRoot '资料库' }
+  $startupStage = '读取项目路径'
+  $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
+  $programRoot = Join-Path $ProjectRoot '程序文件'
+  $configuredContentRoot = [string]$env:CONTENT_LIBRARY_ROOT
+  $libraryRoot = if ($configuredContentRoot -and [IO.Path]::IsPathRooted($configuredContentRoot)) { [IO.Path]::GetFullPath($configuredContentRoot) } else { Join-Path $ProjectRoot '资料库' }
+} catch {
+  $startupMessage = "无法启动链接资料库（$startupStage）：$($_.Exception.Message)"
+  # The script location is reliable even when the supplied project path is invalid.
+  $startupLog = Join-Path $PSScriptRoot 'logs\link-window.log'
+  try {
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $startupLog))
+    [IO.File]::AppendAllText($startupLog, ([DateTime]::Now.ToString('s') + ' ' + $startupMessage + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))
+  } catch {}
+  if ($NoShow) { throw $startupMessage }
+  [void][Windows.Forms.MessageBox]::Show(($startupMessage + "`n`n请从项目目录重新打开启动器。详细记录：" + $startupLog), '链接资料库启动失败', 'OK', 'Error')
+  exit 1
+}
 $script:linkJob = $null
 $script:linkWorkJob = $null
 $script:linkPollJob = $null
@@ -95,12 +111,18 @@ $queueList.IntegralHeight = $false
 $queueList.HorizontalScrollbar = $true
 $queueGroup.Controls.Add($queueList)
 $cancelButton = Add-LinkButton '取消任务' 900 226 96
+$cancelButton.Parent = $queueGroup
+$cancelButton.Location = New-Object Drawing.Point(876, 32)
 $cancelButton.Anchor = 'Top, Right'
 $cancelButton.Enabled = $false
 $retryButton = Add-LinkButton '重试任务' 1000 226 96
+$retryButton.Parent = $queueGroup
+$retryButton.Location = New-Object Drawing.Point(976, 32)
 $retryButton.Anchor = 'Top, Right'
 $retryButton.Enabled = $false
 $queueStatus = Add-LinkLabel '阶段 / 耗时会显示在任务列表中。' 900 270 190 68
+$queueStatus.Parent = $queueGroup
+$queueStatus.Location = New-Object Drawing.Point(876, 76)
 $queueStatus.Anchor = 'Top, Right'
 $queueStatus.ForeColor = [Drawing.Color]::DimGray
 

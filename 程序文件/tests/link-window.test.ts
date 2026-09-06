@@ -3,9 +3,72 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const programRoot = path.resolve(import.meta.dirname, '..');
 const projectRoot = path.resolve(programRoot, '..');
+
+test('真实 CMD 入口在含空格和中文的目录中正确定位后端，且启动后退出控制台', { skip: process.platform !== 'win32' }, async () => {
+  const runRoot = fs.mkdtempSync(path.join(programRoot, 'logs', 'link-launcher-'));
+  const fixtureRoot = path.join(runRoot, '中文路径 (with spaces)');
+  const fixtureProgram = path.join(fixtureRoot, '程序文件');
+  fs.mkdirSync(path.join(fixtureProgram, 'dist'), { recursive: true });
+  const reportPath = path.join(fixtureProgram, 'launcher-report.json');
+  const releasePath = path.join(fixtureProgram, 'release');
+  const finishedPath = path.join(fixtureProgram, 'finished');
+  const launcherPath = path.join(fixtureRoot, '启动链接资料库.cmd');
+  const launcher = fs.readFileSync(path.join(projectRoot, '启动链接资料库.cmd'), 'utf8');
+  // Preserve the actual CMD invocation/quoting. Only suppress the modal form in this test.
+  fs.writeFileSync(launcherPath, launcher.replace(/(-File "[^"\r\n]*link-window\.ps1")/, '$1 -NoShow'));
+  const windowSource = fs.readFileSync(path.join(programRoot, 'link-window.ps1'), 'utf8');
+  fs.writeFileSync(path.join(fixtureProgram, 'link-window.ps1'), windowSource + `
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'launcher-report.json'), ([ordered]@{
+  projectRoot = $ProjectRoot; programRoot = $programRoot; processId = $PID
+  cliExists = (Test-Path -LiteralPath (Join-Path $programRoot 'dist\\link-cli.js') -PathType Leaf)
+} | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+$deadline = [DateTime]::UtcNow.AddSeconds(15)
+while (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'release')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+$linkTimer.Dispose()
+$tooltip.Dispose()
+$form.Dispose()
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'finished'), 'ok')
+`);
+  fs.copyFileSync(path.join(programRoot, 'reader-process.ps1'), path.join(fixtureProgram, 'reader-process.ps1'));
+  fs.writeFileSync(path.join(fixtureProgram, 'dist', 'link-cli.js'), '');
+  try {
+    const launched = spawnSync('cmd.exe', ['/d', '/s', '/c', `""${launcherPath}""`], {
+      encoding: 'utf8', windowsVerbatimArguments: true, windowsHide: true, timeout: 10000, stdio: 'ignore',
+      env: { ...process.env, CONTENT_LIBRARY_ROOT: path.join(runRoot, 'isolated-library') }
+    });
+    for (let attempt = 0; attempt < 100 && !fs.existsSync(reportPath); attempt++) await delay(100);
+    assert.equal(launched.status, 0, `${launched.stdout}\n${launched.stderr}\n${launched.error ?? ''}`);
+    assert.ok(fs.existsSync(reportPath), `CMD did not produce a startup report: ${launched.stdout}\n${launched.stderr}`);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.projectRoot, fixtureRoot);
+    assert.equal(report.programRoot, fixtureProgram);
+    assert.equal(report.cliExists, true, '存在的 dist/link-cli.js 不得误报缺失');
+    assert.equal(fs.existsSync(finishedPath), false, 'CMD 必须先退出，不能等待窗口退出');
+    assert.doesNotThrow(() => process.kill(report.processId, 0), 'CMD 退出后窗口进程必须仍在运行');
+  } finally {
+    fs.writeFileSync(releasePath, 'release');
+    for (let attempt = 0; attempt < 100 && !fs.existsSync(finishedPath); attempt++) await delay(50);
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test('非法项目路径在初始化时停止，不再误报后端缺失或打开损坏窗口', { skip: process.platform !== 'win32' }, () => {
+  const logPath = path.join(programRoot, 'logs', 'link-window.log');
+  const previousLogBytes = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(programRoot, 'link-window.ps1'),
+    '-NoShow', '-ProjectRoot', `${projectRoot}"`
+  ], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const diagnostic = fs.readFileSync(logPath).subarray(previousLogBytes).toString('utf8');
+  assert.match(diagnostic, /无法启动链接资料库（读取项目路径）/);
+  assert.match(result.stderr, /GetFullPath/);
+  assert.doesNotMatch(diagnostic + result.stderr, /缺少程序文件|Test-Path/);
+});
 
 test('链接资料库窗口和启动器存在并保留明确的入口契约', () => {
   const window = fs.readFileSync(path.join(programRoot, 'link-window.ps1'), 'utf8');
