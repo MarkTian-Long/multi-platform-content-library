@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import TurndownService from "turndown";
 import type { ArticleRecord } from "./article.js";
+import { attachArticleVideoCandidates, extractArticleVideos } from "./article-videos.js";
 
 export function extractRenderedArticle(html: string, sourceUrl: string, extractedAt = new Date()): ArticleRecord {
   const $ = cheerio.load(html);
@@ -11,6 +12,7 @@ export function extractRenderedArticle(html: string, sourceUrl: string, extracte
   const timestamp = extractedAt.toISOString();
   if (!content.length) return { title, author, publishedAt, markdown: "", sourceUrl, extractedAt: timestamp, status: "empty" };
 
+  const { videos, candidates } = extractArticleVideos($, content, sourceUrl);
   content.find("script, style, iframe, form, svg, canvas, noscript").remove();
   content.find("*").each((_, node) => {
     const element = node as unknown as { attribs?: Record<string, string> };
@@ -36,5 +38,7 @@ export function extractRenderedArticle(html: string, sourceUrl: string, extracte
   });
   const service = new TurndownService({ headingStyle: "atx", bulletListMarker: "-" });
   const markdown = service.turndown(content.html() ?? "").replace(/\n{3,}/g, "\n\n").trim();
-  return { title, author, publishedAt, markdown, sourceUrl, extractedAt: timestamp, status: markdown ? (title === "未命名文章" ? "partial" : "complete") : "empty", images };
+  const article: ArticleRecord = { title, author, publishedAt, markdown, sourceUrl, extractedAt: timestamp, status: markdown ? (title === "未命名文章" ? "partial" : "complete") : "empty", images, videos };
+  attachArticleVideoCandidates(article, candidates);
+  return article;
 }

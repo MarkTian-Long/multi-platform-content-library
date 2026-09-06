@@ -2,3 +2,11 @@
 程序文件/dist/
 程序文件/.wechat-reader-profile/
 文章库/
+程序文件/logs/
+资料库/
+程序文件/tools/
+程序文件/.venv-content/
+程序文件/.content-profile/
+程序文件/.content-browser/
+程序文件/.content-login/
+程序文件/scripts/__pycache__/
