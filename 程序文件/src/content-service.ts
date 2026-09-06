@@ -12,6 +12,7 @@ import { getJobs,runJobs,updateJob } from "./content-jobs.js";
 import { findArticles,readArticle,type ArticleManifest } from "./article-library.js";
 import { resolveLibraryRoot } from "./config.js";
 import { resolveEdgeExecutable } from "./url-policy.js";
+import { rewriteLocalAssetLinks } from "./content-paths.js";
 export function runtimeDirectory():string{return process.env.WECHAT_ARTICLE_READER_ROOT?.trim()||path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");}
 export function contentRoot(runtimeRoot=runtimeDirectory()):string{return process.env.CONTENT_LIBRARY_ROOT?.trim()||path.resolve(runtimeRoot,"..","资料库");}
 export interface ServiceDeps { resolve?:(input:ContentInput,signal?:AbortSignal)=>Promise<ContentInput>; acquire?:(input:ContentInput,context:ContentContext)=>Promise<CapturedContent>;enrich?:(record:CapturedContent,context:ContentContext)=>Promise<CapturedContent>;pdf?:(directory:string,signal?:AbortSignal)=>Promise<string|undefined>; }
@@ -19,16 +20,17 @@ export interface ServiceDeps { resolve?:(input:ContentInput,signal?:AbortSignal)
 export async function generateContentPdf(directory:string,signal?:AbortSignal):Promise<string|undefined>{
   if(signal?.aborted)throw new DOMException("已取消","AbortError");const browser=await chromium.launch({executablePath:resolveEdgeExecutable(),headless:true});
   const abort=()=>{void browser.close().catch(()=>{});};signal?.addEventListener("abort",abort,{once:true});
-  const temporary=await writableFile(directory,"reading.pending.pdf");
-  try{const page=await browser.newPage();await page.route(/^https?:\/\//,route=>route.abort());await page.goto(pathToFileURL(await containedFile(directory,"reading.html")).toString(),{waitUntil:"load",timeout:20000});
+  const temporary=await writableFile(directory,"阅读.pending.pdf");
+  try{const manifest=JSON.parse(await fs.readFile(await containedFile(directory,"content.json"),"utf8"));
+    const page=await browser.newPage();await page.route(/^https?:\/\//,route=>route.abort());await page.goto(pathToFileURL(await containedFile(directory,manifest.readingFile||"reading.html")).toString(),{waitUntil:"load",timeout:20000});
     await page.evaluate(()=>{document.querySelectorAll("img").forEach(image=>{image.loading="eager";});});
     await page.pdf({path:temporary,format:"A4",printBackground:true,margin:{top:"16mm",bottom:"16mm",left:"16mm",right:"16mm"}});
     const handle=await fs.open(temporary,"r");const signature=Buffer.alloc(5);try{await handle.read(signature,0,5,0);}finally{await handle.close();}
-    if(signature.toString()!=="%PDF-")throw new Error("PDF格式校验失败");await fs.rename(temporary,path.join(directory,"reading.pdf"));return "reading.pdf";
+    if(signature.toString()!=="%PDF-")throw new Error("PDF格式校验失败");await fs.rename(temporary,await writableFile(directory,"阅读.pdf"));return "阅读.pdf";
   }finally{signal?.removeEventListener("abort",abort);await browser.close().catch(()=>{});await fs.unlink(temporary).catch(()=>{});}
 }
-async function copyAsset(sourceDir:string,relative:string,stage:string):Promise<void>{
-  const source=await containedFile(sourceDir,relative);const target=await writableFile(stage,relative);
+async function copyAsset(sourceDir:string,relative:string,stage:string,destination=relative):Promise<void>{
+  const source=await containedFile(sourceDir,relative);const target=await writableFile(stage,destination);
   if(source!==target)await fs.copyFile(source,target);
 }
 async function legacyRecord(root:string,legacyRoot:string,manifest:ArticleManifest,directory:string,stage:string):Promise<CapturedContent>{
@@ -70,7 +72,11 @@ export async function processContentJob(runtimeRoot:string,root:string,job:Conte
   let existing:CapturedContent|undefined;
   if(previous){existing={...previous.manifest,assets:previous.manifest.assets.map(a=>({...a}))};
     if(previous.manifest.bodyFile)existing.markdown=await fs.readFile(await containedFile(previous.directory,previous.manifest.bodyFile),"utf8");
-    for(const asset of existing.assets)if(asset.path&&asset.status==="saved")try{const file=await containedFile(previous.directory,asset.path);if(asset.sha256&&await fileHash(file)!==asset.sha256)throw new Error("校验失败");await copyAsset(previous.directory,asset.path,stage);}catch{asset.status="failed";asset.reason="已存文件缺失或校验失败";}
+    const restorePaths=new Map<string,string>();
+    for(const asset of existing.assets)if(asset.path&&asset.status==="saved")try{const file=await containedFile(previous.directory,asset.path);if(asset.sha256&&await fileHash(file)!==asset.sha256)throw new Error("校验失败");
+      const capturePath=asset.capturePath??asset.path;await copyAsset(previous.directory,asset.path,stage,capturePath);restorePaths.set(asset.path,capturePath);asset.path=capturePath;
+    }catch{asset.status="failed";asset.reason="已存文件缺失或校验失败";}
+    existing.markdown=rewriteLocalAssetLinks(existing.markdown,restorePaths);
   }
   let latest=previous?.manifest;let pendingProgress=Promise.resolve();let lastProgress=0;
   const context:ContentContext={runtimeRoot,directory:stage,signal,existing,onProgress:message=>{
@@ -85,14 +91,14 @@ export async function processContentJob(runtimeRoot:string,root:string,job:Conte
   await updateJob(root,job.id,{stage:"生成阅读资料",message:"正在提取字幕、转写与识别图片"});
   record=await (deps.enrich??enrichContent)(record,context);await context.onCheckpoint!(record);
   if(signal.aborted)throw new DOMException("已取消","AbortError");
-  try{const pdf=await (deps.pdf??generateContentPdf)(contentDirectory(root,latest!.contentId),signal);if(pdf){await copyAsset(contentDirectory(root,latest!.contentId),pdf,stage);record.assets=record.assets.filter(a=>a.id!=="reading-pdf");record.assets.push({id:"reading-pdf",role:"pdf",status:"saved",path:pdf,provenance:"generated"});}}
+  try{const directory=await contentDirectory(root,latest!.contentId);const pdf=await (deps.pdf??generateContentPdf)(directory,signal);if(pdf){await copyAsset(directory,pdf,stage);record.assets=record.assets.filter(a=>a.id!=="reading-pdf");record.assets.push({id:"reading-pdf",role:"pdf",status:"saved",path:pdf,provenance:"generated"});}}
   catch(error){record.assets.push({id:"reading-pdf",role:"pdf",status:"failed",reason:publicValue(error instanceof Error?error.message:"PDF生成失败")});}
   latest=await saveContent(root,{...record,sourceUrl:job.input.url},stage,{replacePreviousFailures:true});await updateJob(root,job.id,{contentId:latest.contentId,title:record.title});await pendingProgress;
   const missing=latest.assets.filter(a=>a.status!=="saved").length;
   return {state:latest.status,contentId:latest.contentId,title:record.title,message:latest.status==="completed"?"资料已保存，可离线阅读":latest.status==="failed"?"本轮未取得可阅读的资料，请查看失败原因":missing?`已保存可取得的资料；${missing}项未就绪，请查看逐项结果`:"主体资料已保存，部分内容的覆盖范围尚未确认，请查看采集说明"};
   } catch(error) {
     if(latest){const reason=signal.aborted?"本轮处理已取消，尚未完成的资料可重试":publicValue(error instanceof Error?error.message:"处理未完成");
-      await saveContent(root,{...latest,warnings:[...latest.warnings,reason],assets:[...latest.assets.filter(a=>a.id!=="pipeline-error"),{id:"pipeline-error",role:"source",status:"failed",reason}]},contentDirectory(root,latest.contentId)).catch(()=>{});
+      await saveContent(root,{...latest,warnings:[...latest.warnings,reason],assets:[...latest.assets.filter(a=>a.id!=="pipeline-error"),{id:"pipeline-error",role:"source",status:"failed",reason}]},await contentDirectory(root,latest.contentId)).catch(()=>{});
     }await pendingProgress;throw error;
   }
 }

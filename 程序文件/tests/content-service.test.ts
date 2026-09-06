@@ -5,11 +5,23 @@ import os from "node:os";
 import path from "node:path";
 import { processContentJob,listSavedContent } from "../src/content-service.js";
 import { enqueueInputs,getJobs } from "../src/content-jobs.js";
-import { findContent,readContent,saveContent } from "../src/content-library.js";
+import { findContent,readContent,saveContent,contentIdentity } from "../src/content-library.js";
 import type { CapturedContent } from "../src/content-types.js";
 import { saveArticle } from "../src/article-library.js";
 async function fixture(t:any){const root=await fs.mkdtemp(path.join(os.tmpdir(),"link-service-"));t.after(()=>fs.rm(root,{recursive:true,force:true}));const [job]=await enqueueInputs(root,[{platform:"web",url:"https://example.com/article",canonicalUrl:"https://example.com/article"}]);return {root,job};}
 const base:CapturedContent={platform:"web",sourceUrl:"https://example.com/article",canonicalUrl:"https://example.com/article",title:"示例",kind:"article",capturedAt:"2026-09-06T00:00:00Z",markdown:"原始文字",assets:[],warnings:[]};
+test("retry restores stable capture paths after readable file names were published",async t=>{
+ const {root,job}=await fixture(t);const id=contentIdentity(base),directory=path.join(root,"items",id),savedPath="视频/原片.mp4",capturePath="media/original-id/video.mp4";
+ await fs.mkdir(path.join(directory,"视频"),{recursive:true});await fs.writeFile(path.join(directory,savedPath),"original-media");
+ const body="![原片]("+encodeURI(savedPath)+")";await fs.writeFile(path.join(directory,"原始正文.md"),body);await fs.writeFile(path.join(directory,"资料正文.md"),body);await fs.writeFile(path.join(directory,"阅读.html"),"<p>原片</p>");
+ await fs.writeFile(path.join(directory,"content.json"),JSON.stringify({...base,markdown:body,contentId:id,schemaVersion:1,namingVersion:1,status:"completed",aliases:[base.sourceUrl],updatedAt:base.capturedAt,contentHash:"fixture",bodyFile:"原始正文.md",markdownFile:"资料正文.md",readingFile:"阅读.html",assets:[{id:"video-stable",role:"video",status:"saved",path:savedPath,capturePath}]}));
+ let acquired=false;
+ await processContentJob(root,root,job,new AbortController().signal,{resolve:async i=>i,acquire:async(_input,context)=>{
+   assert.equal(context.existing?.assets[0].path,capturePath);assert.equal(await fs.readFile(path.join(context.directory,capturePath),"utf8"),"original-media");
+   assert.match(context.existing!.markdown,/media\/original-id\/video\.mp4/);acquired=true;return context.existing!;
+ },enrich:async record=>record,pdf:async()=>undefined});
+ assert.ok(acquired);
+});
 test("pipeline persists original content before enrichment fails",async t=>{
  const {root,job}=await fixture(t);await assert.rejects(processContentJob(path.join(root,"runtime"),root,job,new AbortController().signal,{resolve:async i=>i,acquire:async(i,c)=>{await c.onCheckpoint?.(base);return base;},enrich:async()=>{throw new Error("识别失败");},pdf:async()=>undefined}),/识别失败/);
  assert.equal((await findContent(root)).length,1);assert.ok((await getJobs(root))[0].contentId);

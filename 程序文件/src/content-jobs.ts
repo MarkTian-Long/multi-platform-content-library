@@ -6,6 +6,10 @@ import type { ContentInput,ContentJob } from "./content-types.js";
 const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch(error){return (error as NodeJS.ErrnoException).code==="EPERM";}};
 async function liveLock(file:string):Promise<boolean>{try{const data=JSON.parse(await fs.readFile(file,"utf8"));return Number.isInteger(data.pid)&&alive(data.pid);}catch{return false;}}
 export const isContentWorkerActive=(root:string)=>liveLock(path.join(root,"worker.lock"));
+/** Maintenance shares the worker mutex so file moves cannot race with downloads/checkpoints. */
+export async function withContentMaintenance<T>(root:string,operation:()=>Promise<T>):Promise<T>{
+  const release=await lock(root,"worker",1200);try{return await operation();}finally{await release();}
+}
 async function lock(root:string,name:string,waitMs=8000):Promise<()=>Promise<void>>{
   await ensureDirectory(root);const file=path.join(root,`${name}.lock`),token=crypto.randomUUID(),deadline=Date.now()+waitMs;
   while(true){try{const handle=await fs.open(file,"wx");await handle.writeFile(JSON.stringify({pid:process.pid,token}));await handle.close();

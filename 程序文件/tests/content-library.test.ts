@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { contentIdentity, contentStatus, saveContent, findContent, readContent, exportContent, publicValue, contentFile, atomicJson } from "../src/content-library.js";
+import { contentIdentity, contentStatus, saveContent, findContent, readContent, exportContent, publicValue, contentFile, atomicJson, contentDirectory, listManifests } from "../src/content-library.js";
 import type { CapturedContent } from "../src/content-types.js";
 
 const record = (overrides: Partial<CapturedContent> = {}): CapturedContent => ({ platform:"xiaohongshu", nativeId:"note123", sourceUrl:"https://www.xiaohongshu.com/explore/note123?xsec_token=SECRET", canonicalUrl:"https://www.xiaohongshu.com/explore/note123", title:"中文资料", kind:"article", markdown:"# 正文\n独特检索词", capturedAt:"2026-09-06T12:00:00Z", assets:[], warnings:[], ...overrides });
@@ -49,12 +49,12 @@ test("a junction in items cannot redirect writes outside the library",async t=>{
 test("saving a loaded manifest does not append transcripts again",async t=>{
  const {root,stage}=await fixture(t);await fs.writeFile(path.join(stage,"transcript.md"),"唯一一句转写");
  const first=await saveContent(root,record({assets:[{id:"t",role:"transcript",status:"saved",path:"transcript.md"}]}),stage);
- const second=await saveContent(root,first,path.join(root,"items",first.contentId));assert.equal(second.markdown,first.markdown);
+ const second=await saveContent(root,first,await contentDirectory(root,first.contentId));assert.equal(second.markdown,first.markdown);
 });
 test("modified retained files become explicit failures instead of disappearing",async t=>{
  const {root,stage}=await fixture(t);await fs.writeFile(path.join(stage,"a.png"),"original");
  const first=await saveContent(root,record({assets:[{id:"image",role:"image",status:"saved",path:"a.png"}]}),stage);
- await fs.writeFile(path.join(root,"items",first.contentId,"a.png"),"modified");const second=await saveContent(root,record(),stage);
+ await fs.writeFile(await contentFile(root,first.contentId,first.assets[0].path!),"modified");const second=await saveContent(root,record(),stage);
  assert.equal(second.status,"partial");assert.equal(second.assets[0].status,"failed");
 });
 test("oversize text fails explicitly before saving an unreadable manifest",async t=>{
@@ -63,7 +63,7 @@ test("oversize text fails explicitly before saving an unreadable manifest",async
 test("ASS and description text exports pass through the same redaction",async t=>{
  const {root,stage}=await fixture(t);await fs.writeFile(path.join(stage,"s.ass"),"Dialogue: token=EXPOSED");
  const first=await saveContent(root,record({assets:[{id:"s",role:"subtitle",status:"saved",path:"s.ass"}]}),stage);
- const result=await exportContent(root,first.contentId);assert.doesNotMatch(await fs.readFile(path.join(result.directory,"s.ass"),"utf8"),/EXPOSED/);
+ const result=await exportContent(root,first.contentId);assert.doesNotMatch(await fs.readFile(path.join(result.directory,first.assets[0].path!),"utf8"),/EXPOSED/);
 });
 test("an omitted missing dependency keeps its actionable status",async t=>{const {root,stage}=await fixture(t);await saveContent(root,record({assets:[{id:"asr",role:"transcript",status:"missing_dependency",reason:"安装模型"}]}),stage);const second=await saveContent(root,record(),stage);assert.equal(second.assets[0].status,"missing_dependency");assert.equal(second.assets[0].reason,"安装模型");});
 
@@ -79,4 +79,34 @@ test("transient Windows rename contention retries without deleting the last good
  const rename=fs.rename.bind(fs);let failures=0;
  t.mock.method(fs,"rename",async(source:any,destination:any)=>{if(destination===file&&failures++<2){assert.equal(JSON.parse(await fs.readFile(file,"utf8")).version,0);throw Object.assign(new Error("brief reader lock"),{code:"EPERM"});}return rename(source,destination);});
  await atomicJson(file,{version:1});assert.equal(JSON.parse(await fs.readFile(file,"utf8")).version,1);assert.equal(failures,3);
+});
+
+test("new records use a readable verified folder and Chinese root documents",async t=>{
+ const {root,stage}=await fixture(t);const saved=await saveContent(root,record({title:"可读资料标题"}),stage);
+ const directory=await contentDirectory(root,saved.contentId);
+ assert.notEqual(directory,path.join(root,"items",saved.contentId));
+ assert.match(path.basename(directory),/可读资料标题/);assert.ok(path.basename(directory).endsWith(`[${saved.contentId.slice(0,8)}]`));
+ assert.equal((await fs.stat(path.join(directory,"资料正文.md"))).isFile(),true);
+ assert.equal((await fs.stat(path.join(directory,"原始正文.md"))).isFile(),true);
+ assert.equal((await fs.stat(path.join(directory,"阅读.html"))).isFile(),true);
+ assert.equal(saved.namingVersion,1);assert.equal(saved.markdownFile,"资料正文.md");assert.equal(saved.bodyFile,"原始正文.md");assert.equal(saved.readingFile,"阅读.html");
+});
+
+test("resolves legacy ID folders while arbitrary readable folders are indexed by their verified manifest",async t=>{
+ const {root}=await fixture(t);const first=record(),legacyId=contentIdentity(first),legacy=path.join(root,"items",legacyId);
+ const manifest={...first,schemaVersion:1 as const,contentId:legacyId,status:"completed" as const,aliases:[first.sourceUrl],updatedAt:first.capturedAt,contentHash:"a".repeat(64),markdownFile:"content.md",bodyFile:"body.md",readingFile:"reading.html"};
+ await fs.mkdir(legacy,{recursive:true});await fs.writeFile(path.join(legacy,"content.json"),JSON.stringify(manifest));await fs.writeFile(path.join(legacy,"content.md"),first.markdown);
+ assert.equal(await contentDirectory(root,legacyId),legacy);
+ const second=record({nativeId:"note-other",title:"另一篇可读资料"}),secondId=contentIdentity(second),readable=path.join(root,"items","小红书-另一篇可读资料-00000000");
+ await fs.mkdir(readable,{recursive:true});await fs.writeFile(path.join(readable,"content.json"),JSON.stringify({...manifest,...second,contentId:secondId}));
+ const items=await listManifests(root);assert.deepEqual(items.map(item=>item.manifest.contentId).sort(),[legacyId,secondId].sort());assert.equal(await contentDirectory(root,secondId),readable);
+});
+
+test("saving remaps only local Markdown asset targets to their planned readable paths",async t=>{
+ const {root,stage}=await fixture(t);await fs.mkdir(path.join(stage,"capture"));await fs.writeFile(path.join(stage,"capture","a photo.png"),"image");
+ const saved=await saveContent(root,record({markdown:"![原图](capture/a%20photo.png)\n远程 https://example.test/capture/a%20photo.png\n普通句子 capture/a photo.png",assets:[{id:"image",role:"image",status:"saved",path:"capture/a photo.png",capturePath:"capture/a photo.png"} as any]}),stage);
+ const image=saved.assets[0];assert.ok(image.path&&image.path!=="capture/a photo.png");
+ const body=await fs.readFile(await contentFile(root,saved.contentId,saved.markdownFile),"utf8");assert.match(body,new RegExp(`!\\[原图\\]\\(${image.path!.split(/[\\\\/]/).map(encodeURIComponent).join("/").replace(/[.*+?^${}()|[\\]\\\\]/g,"\\\\$&")}\\)`));
+ assert.match(body,/https:\/\/example\.test\/capture\/a%20photo\.png/);assert.match(body,/普通句子 capture\/a photo\.png/);
+ assert.equal(image.capturePath,"capture/a photo.png");
 });

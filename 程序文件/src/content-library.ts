@@ -5,6 +5,8 @@ import { createReadStream } from "node:fs";
 import path from "node:path";
 import type { CapturedContent, ContentAsset, ContentListItem, ContentManifest, ContentStatus } from "./content-types.js";
 import { isPathWithin } from "./url-policy.js";
+import { contentFolderName,planAssetNames } from "./content-naming.js";
+import { rewriteLocalAssetLinks } from "./content-paths.js";
 
 const ID = /^[a-f0-9]{24}$/;
 const secret = /token|secret|signature|authorization|cookie|session|sessdata|vkey|auth_key|^(?:sign|sig|key|expires|deadline|wstime|txtime|xsec_source)$/i;
@@ -21,7 +23,15 @@ export function publicValue<T>(value:T):T {
   if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value).filter(([key])=>!(key==="sourceUrl"&&"role" in value)).map(([key,item])=>[key,secret.test(key)?"[已隐藏]":publicValue(item)])) as T;return value;
 }
 export function contentIdentity(record:Pick<CapturedContent,"platform"|"nativeId"|"canonicalUrl">):string{return crypto.createHash("sha256").update(`${record.platform}:${record.nativeId||publicUrl(record.canonicalUrl)}`).digest("hex").slice(0,24);}
-export function contentDirectory(root:string,id:string):string{if(!ID.test(id))throw new Error("资料标识无效");return path.join(root,"items",id);}
+export async function contentDirectory(root:string,id:string):Promise<string>{
+  if(!ID.test(id))throw new Error("资料标识无效");
+  const legacy=path.join(root,"items",id);
+  if((await loadManifest(legacy))?.contentId===id)return legacy;
+  for(const entry of await fs.readdir(path.join(root,"items"),{withFileTypes:true}).catch(()=>[])){
+    if(!entry.isDirectory()||entry.isSymbolicLink()||entry.name===id)continue;
+    const directory=path.join(root,"items",entry.name);if((await loadManifest(directory))?.contentId===id)return directory;
+  }return legacy;
+}
 export async function ensureDirectory(directory:string):Promise<void>{
   const absolute=path.resolve(directory);let current=path.parse(absolute).root;
   for(const segment of path.relative(current,absolute).split(path.sep).filter(Boolean)){
@@ -88,42 +98,58 @@ async function loadManifest(directory:string):Promise<ContentManifest|undefined>
 }catch{return undefined;}}
 export async function saveContent(root:string,record:CapturedContent,stage:string,options:{replacePreviousFailures?:boolean}={}):Promise<ContentManifest>{
   if(Buffer.byteLength(record.markdown,"utf8")>4*1024*1024)throw new Error("正文超过4 MiB索引上限，原始文件仍保留在工作目录");
-  const contentId=contentIdentity(record),directory=contentDirectory(root,contentId),previous=await loadManifest(directory);
+  const contentId=contentIdentity(record);let directory=await contentDirectory(root,contentId);const previous=await loadManifest(directory);
   for(const asset of record.assets)if(asset.status==="saved"&&asset.path)await containedFile(stage,asset.path);
-  await ensureDirectory(directory);const assets:ContentAsset[]=[];
+  if(!previous){
+    await ensureDirectory(path.join(root,"items"));const name=contentFolderName(record,contentId);directory=path.join(root,"items",name);
+    for(let suffix=2;await fs.lstat(directory).then(()=>true,()=>false);suffix++)directory=path.join(root,"items",`${name} (${suffix})`);
+  }
+  await ensureDirectory(directory);const merged:ContentAsset[]=[];const sources=new Map<string,string>();
   for(const incoming of record.assets){
     const prior=previous?.assets.find(a=>a.id===incoming.id);
-    if(incoming.status!=="saved"&&prior&&await verifiedAsset(directory,prior)){assets.push(prior);continue;}
+    if(incoming.status!=="saved"&&prior&&await verifiedAsset(directory,prior)){merged.push({...prior});sources.set(prior.id,await containedFile(directory,prior.path!));continue;}
     if(incoming.status==="saved"&&incoming.path){
       const source=await containedFile(stage,incoming.path),bytes=(await fs.stat(source)).size;
-      if(bytes===0){assets.push({...incoming,status:"failed",reason:"文件为空，未标记保存成功"});continue;}
-      const dest=await writableFile(directory,incoming.path),sha256=await fileHash(source);
+      if(bytes===0){merged.push({...incoming,status:"failed",reason:"文件为空，未标记保存成功"});continue;}
+      sources.set(incoming.id,source);merged.push({...incoming,bytes,sha256:await fileHash(source)});
+    }else merged.push({...incoming});
+  }
+  for(const prior of previous?.assets??[])if(!merged.some(a=>a.id===prior.id)&&!(options.replacePreviousFailures&&prior.status!=="saved")){
+    if(prior.status==="saved"&&await verifiedAsset(directory,prior)){merged.push({...prior});sources.set(prior.id,await containedFile(directory,prior.path!));}
+    else merged.push(prior.status!=="saved"?{...prior}:{...prior,status:"failed",reason:"已存文件缺失或完整性校验失败，请重试补充"});
+  }
+  const assets=planAssetNames({...record,assets:merged},previous?.namingVersion===1?previous.assets:undefined);
+  const mapping=new Map<string,string>(),remoteMapping=new Map<string,string>();
+  for(const asset of assets)if(asset.status==="saved"&&asset.path){
+      const source=sources.get(asset.id);if(!source)throw new Error("找不到待保存的资料文件");
+      const before=merged.find(a=>a.id===asset.id);if(before?.path)mapping.set(before.path,asset.path);
+      if(asset.capturePath)mapping.set(asset.capturePath,asset.path);
+      if(asset.sourceUrl)remoteMapping.set(asset.sourceUrl,asset.path);
+      const dest=await writableFile(directory,asset.path),bytes=(await fs.stat(source)).size,sha256=await fileHash(source);
       if(source!==dest&&!(await fs.stat(dest).then(s=>s.size===bytes,()=>false)&&await fileHash(dest)===sha256)){
         const temp=`${dest}.${crypto.randomUUID()}.part`;try{await fs.copyFile(source,temp);await atomicReplace(temp,dest);}finally{await fs.unlink(temp).catch(()=>{});}
-      }assets.push({...incoming,bytes,sha256});
-    }else assets.push({...incoming});
+      }asset.bytes=bytes;asset.sha256=sha256;
   }
-  for(const prior of previous?.assets??[])if(!assets.some(a=>a.id===prior.id)&&!(options.replacePreviousFailures&&prior.status!=="saved"))assets.push(prior.status!=="saved"||await verifiedAsset(directory,prior)?prior:{...prior,status:"failed",reason:"已存文件缺失或完整性校验失败，请重试补充"});
   let body=record.markdown;
   if("schemaVersion" in record&&previous?.bodyFile)body=await fs.readFile(await containedFile(directory,previous.bodyFile),"utf8");
   if(!body&&previous?.bodyFile)body=await fs.readFile(await containedFile(directory,previous.bodyFile),"utf8");
-  let markdown=body;const warnings=[...record.warnings];
-  for(const a of assets)if(a.sourceUrl&&a.path&&a.status==="saved")markdown=markdown.split(a.sourceUrl).join(localHref(a.path));
+  body=rewriteLocalAssetLinks(body,mapping);
+  let markdown=rewriteLocalAssetLinks(body,remoteMapping,{allowRemoteSources:true});const warnings=[...record.warnings];
   for(const a of assets)if(a.status==="saved"&&a.path&&["transcript","ocr"].includes(a.role)){
     try{const file=await containedFile(directory,a.path);if((await fs.stat(file)).size+Buffer.byteLength(markdown)<4*1024*1024)markdown+=`\n\n## ${a.label||a.role}（${a.provenance||"generated"}）\n\n${await fs.readFile(file,"utf8")}`;else warnings.push("派生文字超过索引上限，完整原文件已保留");}catch{}
   }
   markdown=redactText(markdown);const now=new Date().toISOString();
-  const manifest:ContentManifest={...record,assets,markdown,warnings,contentId,schemaVersion:1,status:contentStatus({...record,assets,markdown,warnings}),aliases:[...new Set([...(previous?.aliases??[]),record.sourceUrl,record.canonicalUrl])],updatedAt:now,contentHash:crypto.createHash("sha256").update(markdown).digest("hex"),markdownFile:"content.md",bodyFile:"body.md",readingFile:"reading.html"};
+  const manifest:ContentManifest={...record,assets,markdown,warnings,contentId,schemaVersion:1,namingVersion:1,status:contentStatus({...record,assets,markdown,warnings}),aliases:[...new Set([...(previous?.aliases??[]),record.sourceUrl,record.canonicalUrl])],updatedAt:now,contentHash:crypto.createHash("sha256").update(markdown).digest("hex"),markdownFile:"资料正文.md",bodyFile:"原始正文.md",readingFile:"阅读.html"};
   if(Buffer.byteLength(JSON.stringify(manifest))>8*1024*1024)throw new Error("资料清单超过8 MiB上限，文件已保留");
   if(previous&&previous.contentHash!==manifest.contentHash)await atomicJson(await writableFile(directory,`versions/${previous.updatedAt.replace(/[:.]/g,"-")}.json`),publicValue(previous));
-  await atomicText(await writableFile(directory,"body.md"),body);await atomicText(await writableFile(directory,manifest.markdownFile),markdown);await atomicText(await writableFile(directory,manifest.readingFile),renderContentHtml(manifest,markdown));
+  await atomicText(await writableFile(directory,manifest.bodyFile!),body);await atomicText(await writableFile(directory,manifest.markdownFile),markdown);await atomicText(await writableFile(directory,manifest.readingFile),renderContentHtml(manifest,markdown));
   await atomicJson(await writableFile(directory,"content.json"),manifest);return manifest;
 }
 export async function listManifests(root:string):Promise<Array<{directory:string;manifest:ContentManifest}>>{
   const result:Array<{directory:string;manifest:ContentManifest}>=[];
   for(const entry of await fs.readdir(path.join(root,"items"),{withFileTypes:true}).catch(()=>[])){
-    if(!entry.isDirectory()||entry.isSymbolicLink()||!ID.test(entry.name))continue;const directory=contentDirectory(root,entry.name),manifest=await loadManifest(directory);
-    if(manifest&&manifest.contentId===entry.name)result.push({directory,manifest});
+    if(!entry.isDirectory()||entry.isSymbolicLink())continue;const directory=path.join(root,"items",entry.name),manifest=await loadManifest(directory);
+    if(manifest)result.push({directory,manifest});
   }return result.sort((a,b)=>b.manifest.capturedAt.localeCompare(a.manifest.capturedAt));
 }
 export async function findContent(root:string,query=""):Promise<ContentListItem[]>{
@@ -135,20 +161,21 @@ export async function findContent(root:string,query=""):Promise<ContentListItem[
     result.push({contentId:m.contentId,title:m.title,platform:m.platform,kind:m.kind,status:m.status,directory,readingPath,pdfPath:pdf?.path?await containedFile(directory,pdf.path).catch(()=>undefined):undefined,videoPath:media?.path?await containedFile(directory,media.path).catch(()=>undefined):undefined,sourceUrl:publicUrl(m.canonicalUrl),capturedAt:m.capturedAt});
   }return result;
 }
-export async function contentFile(root:string,id:string,relative:string):Promise<string>{return containedFile(contentDirectory(root,id),relative);}
+export async function contentFile(root:string,id:string,relative:string):Promise<string>{return containedFile(await contentDirectory(root,id),relative);}
 export async function readContent(root:string,id:string,offset=0,limit=16000):Promise<{ok:true;text:string;nextOffset:number|null;total:number;manifest:ContentManifest}|{ok:false;reason:string}>{
   if(!ID.test(id)||!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>50000)return {ok:false,reason:"资料标识或读取范围无效"};
-  const directory=contentDirectory(root,id),manifest=await loadManifest(directory);if(!manifest)return {ok:false,reason:"资料不存在或清单损坏"};
+  const directory=await contentDirectory(root,id),manifest=await loadManifest(directory);if(!manifest)return {ok:false,reason:"资料不存在或清单损坏"};
   const file=await containedFile(directory,manifest.markdownFile).catch(()=>undefined);if(!file)return {ok:false,reason:"资料正文不存在"};
   const text=redactText(await fs.readFile(file,"utf8"));return {ok:true,text:text.slice(offset,offset+limit),nextOffset:offset+limit<text.length?offset+limit:null,total:text.length,manifest:publicValue({...manifest,markdown:""})};
 }
 export async function exportContent(root:string,id:string):Promise<{directory:string}>{
-  const source=contentDirectory(root,id),original=await loadManifest(source);if(!original)throw new Error("资料不存在");
-  const manifest=publicValue(original),directory=path.join(root,"exports",`${id}-${Date.now()}-${crypto.randomUUID().slice(0,6)}`);await ensureDirectory(directory);
+  const source=await contentDirectory(root,id),original=await loadManifest(source);if(!original)throw new Error("资料不存在");
+  const manifest=publicValue(original),directory=path.join(root,"exports",`${contentFolderName(original,id)} - ${new Date().toISOString().replace(/[:.]/g,"-")}-${crypto.randomUUID().slice(0,4)}`);await ensureDirectory(directory);
   delete manifest.bodyFile;
   manifest.assets=manifest.assets.filter(a=>!["source","reading","pdf"].includes(a.role));manifest.aliases=[publicUrl(manifest.canonicalUrl)];
   for(const a of manifest.assets)if(a.status==="saved"&&a.path){const from=await containedFile(source,a.path),to=await writableFile(directory,a.path);
     if(["subtitle","transcript","ocr","comments","danmaku"].includes(a.role)){await fs.writeFile(to,redactText(await fs.readFile(from,"utf8")),"utf8");a.bytes=(await fs.stat(to)).size;a.sha256=await fileHash(to);}else await fs.copyFile(from,to);delete a.sourceUrl;
   }
-  await fs.writeFile(path.join(directory,"content.md"),redactText(original.markdown),"utf8");await fs.writeFile(path.join(directory,"reading.html"),renderContentHtml(manifest,redactText(original.markdown)),"utf8");await atomicJson(path.join(directory,"content.json"),manifest);return {directory};
+  manifest.markdownFile="资料正文.md";manifest.readingFile="阅读.html";
+  await fs.writeFile(path.join(directory,manifest.markdownFile),redactText(original.markdown),"utf8");await fs.writeFile(path.join(directory,manifest.readingFile),renderContentHtml(manifest,redactText(original.markdown)),"utf8");await atomicJson(path.join(directory,"content.json"),manifest);return {directory};
 }

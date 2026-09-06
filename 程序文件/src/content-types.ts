@@ -6,6 +6,8 @@ export type AssetStatus = "saved" | "failed" | "unavailable" | "login_required" 
 export interface ContentInput { url: string; platform: ContentPlatform; canonicalUrl: string; nativeId?: string; }
 export interface ContentAsset {
   id: string; role: AssetRole; status: AssetStatus; path?: string; label?: string;
+  /** Stable relative path used by acquisition/enrichment; path is the readable saved name. */
+  capturePath?: string;
   sourceUrl?: string; bytes?: number; sha256?: string; mime?: string; reason?: string;
   provenance?: "original" | "platform_subtitle" | "machine_asr" | "machine_ocr" | "sampled_frame" | "generated";
   language?: string; partId?: string; startMs?: number; endMs?: number;
@@ -29,6 +31,7 @@ export interface ContentManifest extends CapturedContent {
   schemaVersion: 1; contentId: string; status: ContentStatus; aliases: string[];
   updatedAt: string; contentHash: string; markdownFile: string; readingFile: string;
   bodyFile?: string;
+  namingVersion?: 1;
 }
 export interface ContentListItem {
   contentId: string; title: string; platform: ContentPlatform; kind: ContentKind;
