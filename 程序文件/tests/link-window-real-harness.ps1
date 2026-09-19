@@ -51,7 +51,7 @@ try {
   . (Join-Path $programRoot 'link-window.ps1') -ProjectRoot $ProjectRoot -NoShow
   $form.CreateControl()
   $form.PerformLayout()
-  Assert-Window ($libraryRoot -eq $contentRoot) '窗口没有使用临时 CONTENT_LIBRARY_ROOT'
+  Assert-Window ($libraryRoot -eq $contentRoot) ('窗口没有使用临时 CONTENT_LIBRARY_ROOT：实际=' + $libraryRoot + '；预期=' + $contentRoot)
   Assert-Window ($form.ClientSize.Width -eq 1150 -and $form.ClientSize.Height -eq 760) '默认布局尺寸不正确'
 
   $inputBox.Text = 'Example 资料 https://example.com/'
@@ -61,13 +61,22 @@ try {
 
   [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($cancelButton, @([EventArgs]::Empty)) | Out-Null
   Wait-WindowOperation
-  Assert-Window ($queueList.Items[0].Text -match 'cancelled|已取消') '真实 cancel 没有更新任务'
+  Assert-Window ($queueList.Items.Count -eq 0) '已取消任务仍显示在默认当前任务中'
+  [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($historyToggle, @([EventArgs]::Empty)) | Out-Null
+  Wait-WindowOperation
+  Assert-Window ($queueList.Items.Count -eq 1 -and $queueList.Items[0].Text -match '已取消') '真实 cancel 没有更新历史任务'
   [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($retryButton, @([EventArgs]::Empty)) | Out-Null
   Wait-WindowOperation
-  Assert-Window ($queueList.Items[0].Text -match 'queued|等待') '真实 retry 没有恢复任务'
+  [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($historyToggle, @([EventArgs]::Empty)) | Out-Null
+  Wait-WindowOperation
+  Assert-Window ($queueList.Items[0].Text -match '待处理|等待') '真实 retry 没有恢复任务'
 
   [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($workButton, @([EventArgs]::Empty)) | Out-Null
   Wait-WindowOperation
+  if (-not $script:linkShowHistory) {
+    [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($historyToggle, @([EventArgs]::Empty)) | Out-Null
+    Wait-WindowOperation
+  }
   $workState = [string]$queueList.Items[0].Job.state
   $workMessage = [string]$queueList.Items[0].Job.message
   $networkLimited = $workState -eq 'failed' -and $workMessage -match '网络|连接|超时|fetch|ENOTFOUND|Edge|来源|访问'
@@ -83,7 +92,7 @@ try {
   $libraryList.SelectedIndex = $fixtureIndex
   [Windows.Forms.ListBox].GetMethod('OnSelectedIndexChanged', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($libraryList, @([EventArgs]::Empty)) | Out-Null
   Wait-WindowOperation
-  Assert-Window ($assetStatusLabel.Text -match '封面=saved') ('选中资料没有通过真实 read 显示素材状态：' + $assetStatusLabel.Text + '；状态=' + $status.Text)
+  Assert-Window ($assetStatusLabel.Text -match '封面：已保存') ('选中资料没有通过真实 read 显示素材状态：' + $assetStatusLabel.Text + '；状态=' + $status.Text)
   $platformCombo.SelectedIndex = 1
   Refresh-LinkLibrary
   Wait-WindowOperation

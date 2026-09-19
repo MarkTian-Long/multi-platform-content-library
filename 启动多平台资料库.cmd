@@ -15,7 +15,7 @@ if not exist "%PROJECT_ROOT%程序文件\link-window.ps1" (
 )
 where node.exe >nul 2>nul
 if errorlevel 1 (
-  echo 未找到 Node.js，请先安装 Node.js 后再启动链接资料库。
+  echo 未找到 Node.js，请先安装 Node.js 后再启动多平台资料库。
   pause
   exit /b 1
 )
@@ -26,7 +26,7 @@ if not exist "%PROJECT_ROOT%程序文件\dist\link-cli.js" (
 )
 start "" powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%PROJECT_ROOT%程序文件\link-window.ps1"
 if errorlevel 1 (
-  echo 无法创建链接资料库窗口进程，请检查 Windows PowerShell 是否可用。
+  echo 无法创建多平台资料库窗口进程，请检查 Windows PowerShell 是否可用。
   pause
 )
 endlocal

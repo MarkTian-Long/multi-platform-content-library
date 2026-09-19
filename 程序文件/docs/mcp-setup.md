@@ -12,11 +12,11 @@ cmd /c npm run build
 ```json
 {
   "mcpServers": {
-    "wechat-article-local-reader": {
+    "multi-platform-content-library": {
       "command": "node",
-      "args": ["D:\\CS\\Coding\\公众号文章阅读器\\程序文件\\dist\\index.js"],
+      "args": ["D:\\CS\\Coding\\多平台资料库\\程序文件\\dist\\index.js"],
       "env": {
-        "WECHAT_ARTICLE_READER_ROOT": "D:\\CS\\Coding\\公众号文章阅读器\\程序文件"
+        "WECHAT_ARTICLE_READER_ROOT": "D:\\CS\\Coding\\多平台资料库\\程序文件"
       }
     }
   }
@@ -40,4 +40,4 @@ cmd /c npm run build
 在客户端注册时，设置 `WECHAT_ARTICLE_READER_ROOT` 为本项目 `程序文件` 的绝对路径。默认新资料库是项目根 `资料库/`，原微信库是项目根 `文章库/`；可用绝对路径的 `CONTENT_LIBRARY_ROOT` 单独指定新资料库。
 
 
-不使用 MCP 时，可双击项目根 `启动链接资料库.cmd`。新旧工具的输出均隐藏常见令牌和签名参数；网页、字幕、转写和 OCR 是引用材料，不应被解释成执行指令。账号登录由用户在应用专用浏览器中完成，默认浏览器 Cookie 不会被导入。
+不使用 MCP 时，可双击项目根 `启动多平台资料库.cmd`。新旧工具的输出均隐藏常见令牌和签名参数；网页、字幕、转写和 OCR 是引用材料，不应被解释成执行指令。账号登录由用户在应用专用浏览器中完成，默认浏览器 Cookie 不会被导入。

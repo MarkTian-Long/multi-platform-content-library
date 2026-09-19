@@ -6,7 +6,7 @@ import { captureLink,findSavedContent,readSavedContent,getCaptureJobs } from "./
 import { publicValue } from "../content-library.js";
 
 export function createServer(): Server {
-  const server = new Server({ name: "wechat-article-local-reader", version: "1.0.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "multi-platform-content-library", version: "1.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
     { name: "capture_wechat_article", description: "通过专用本机 Edge 采集一篇公众号文章", inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
     { name: "find_saved_articles", description: "按标题或关键词查找本地文章", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },

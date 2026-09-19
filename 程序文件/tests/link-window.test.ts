@@ -16,8 +16,8 @@ test('真实 CMD 入口在含空格和中文的目录中正确定位后端，且
   const reportPath = path.join(fixtureProgram, 'launcher-report.json');
   const releasePath = path.join(fixtureProgram, 'release');
   const finishedPath = path.join(fixtureProgram, 'finished');
-  const launcherPath = path.join(fixtureRoot, '启动链接资料库.cmd');
-  const launcher = fs.readFileSync(path.join(projectRoot, '启动链接资料库.cmd'), 'utf8');
+  const launcherPath = path.join(fixtureRoot, '启动多平台资料库.cmd');
+  const launcher = fs.readFileSync(path.join(projectRoot, '启动多平台资料库.cmd'), 'utf8');
   // Preserve the actual CMD invocation/quoting. Only suppress the modal form in this test.
   fs.writeFileSync(launcherPath, launcher.replace(/(-File "[^"\r\n]*link-window\.ps1")/, '$1 -NoShow'));
   const windowSource = fs.readFileSync(path.join(programRoot, 'link-window.ps1'), 'utf8');
@@ -65,21 +65,21 @@ test('非法项目路径在初始化时停止，不再误报后端缺失或打�
   ], { encoding: 'utf8', timeout: 15000, windowsHide: true });
   assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
   const diagnostic = fs.readFileSync(logPath).subarray(previousLogBytes).toString('utf8');
-  assert.match(diagnostic, /无法启动链接资料库（读取项目路径）/);
+  assert.match(diagnostic, /无法启动多平台资料库（读取项目路径）/);
   assert.match(result.stderr, /GetFullPath/);
   assert.doesNotMatch(diagnostic + result.stderr, /缺少程序文件|Test-Path/);
 });
 
-test('链接资料库窗口和启动器存在并保留明确的入口契约', () => {
+test('多平台资料库窗口和启动器存在并保留明确的入口契约', () => {
   const window = fs.readFileSync(path.join(programRoot, 'link-window.ps1'), 'utf8');
-  const launcher = fs.readFileSync(path.join(projectRoot, '启动链接资料库.cmd'), 'utf8');
+  const launcher = fs.readFileSync(path.join(projectRoot, '启动多平台资料库.cmd'), 'utf8');
 
   assert.equal(window.charCodeAt(0), 0xfeff, 'PowerShell 中文脚本必须使用 UTF-8 BOM');
   assert.equal(launcher.charCodeAt(0), '@'.charCodeAt(0), 'CMD 启动器首字节必须是 ASCII @，不能有 BOM');
   assert.match(launcher, /^@echo off\r\n/);
   assert.match(launcher, /chcp 65001\s*>nul/i);
   assert.equal(launcher.replace(/\r\n/g, '').includes('\n'), false, 'CMD 启动器必须使用 CRLF');
-  assert.match(window, /链接资料库/);
+  assert.match(window, /多平台资料库/);
   assert.match(window, /1150|760/);
   assert.match(window, /enqueue/);
   assert.match(window, /jobs/);
@@ -97,7 +97,7 @@ test('链接资料库窗口和启动器存在并保留明确的入口契约', ()
   assert.match(launcher, /dist\\link-cli\.js/);
 });
 
-test('链接资料库窗口通过参数数组启动 link-cli，并把工作目录固定到程序目录', () => {
+test('多平台资料库窗口通过参数数组启动 link-cli，并把工作目录固定到程序目录', () => {
   const window = fs.readFileSync(path.join(programRoot, 'link-window.ps1'), 'utf8');
   const processHelper = fs.readFileSync(path.join(programRoot, 'reader-process.ps1'), 'utf8');
   assert.match(window, /Start-ReaderProcess/);
