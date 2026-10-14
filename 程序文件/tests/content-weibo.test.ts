@@ -45,6 +45,85 @@ test("Weibo reads only the exact post body/images and excludes retweet, avatar, 
   assert.equal(result.assets.filter(a => a.role === "image" && a.status === "saved").length, 1);
 });
 
+const livePhoto = (id: string, index: number) => ({ pic_id: id, type: "livephoto", largest: { url: `https://wx1.sinaimg.cn/large/${id}.jpg` }, fid: `live${index}`, video: `https://video.weibo.com/media/play?livephoto=${encodeURIComponent(`https://us.sinaimg.cn/live${index}.mov`)}&Expires=2000000000&ssig=fixture` });
+const livePost = () => ({ ...post(), pic_ids: ["photo1", "photo2", "photo3"], pic_num: 3, pic_infos: { photo1: livePhoto("photo1", 1), photo2: { type: "pic", largest: { url: "https://wx1.sinaimg.cn/large/photo2.jpg" } }, photo3: livePhoto("photo3", 3) } });
+
+test("Weibo Live Photos preserve three originals and exactly the first/third motion companions", async t => {
+  const ctx = await context(t), saved: string[] = [], result = await acquireWeibo(input(), ctx, deps(livePost(), saved));
+  assert.equal(result.kind, "gallery");
+  assert.equal(result.assets.filter(a => a.role === "image" && a.status === "saved").length, 3);
+  assert.equal(result.assets.filter(a => a.role === "video" && a.status === "saved").length, 2);
+  assert.deepEqual(saved.filter(url => url.includes("/media/play?")), [livePhoto("photo1", 1).video, livePhoto("photo3", 3).video]);
+  assert.match(result.parts![0].title, /第1张实况照片/); assert.match(result.parts![1].title, /第3张实况照片/);
+  assert.match(result.coverage!.livePhotos, /^saved: 2/);
+  assert.equal(contentStatus({ ...result, processingMode: "original" }), "completed");
+});
+
+test("Weibo Live Photos only select bound own pictures and reject contradictory or duplicate targets", async t => {
+  const ctx = await context(t), saved: string[] = [], own = livePhoto("own", 1);
+  const data = post({ pic_ids: ["own"], pic_num: 1, pic_infos: { own, unrelated: livePhoto("other", 2) }, retweeted_status: livePost(), recommend: [livePost()] });
+  const result = await acquireWeibo(input(), ctx, deps(data, saved));
+  assert.deepEqual(saved, [own.largest.url, own.video]); assert.equal(result.assets.filter(a => a.role === "video").length, 1);
+  for (const video of [own.video.replace("live1.mov", "live2.mov"), own.video + "&livephoto=https%3A%2F%2Fus.sinaimg.cn%2Flive2.mov", "https://video.weibo.com/media/play?livephoto=http%3A%2F%2F127.0.0.1%2Flive1.mov"]) {
+    const fetched: string[] = [], invalid = await acquireWeibo(input(), ctx, deps(post({ pic_ids: ["own"], pic_num: 1, pic_infos: { own: { ...own, video } } }), fetched));
+    assert.equal(fetched.some(url => url.includes("/media/play?")), false);
+    assert.ok(invalid.assets.some(a => a.role === "video" && a.status !== "saved"));
+    assert.equal(contentStatus({ ...invalid, processingMode: "original" }), "partial");
+  }
+});
+
+test("Weibo declared Live Photo with no usable video retains its image and reports partial coverage", async t => {
+  const ctx = await context(t), own = livePhoto("own", 1), result = await acquireWeibo(input(), ctx, deps(post({ pic_ids: ["own"], pic_num: 1, pic_infos: { own: { ...own, video: undefined } } })));
+  assert.equal(result.assets.filter(a => a.role === "image" && a.status === "saved").length, 1);
+  assert.ok(result.assets.some(a => a.role === "video" && a.status === "unavailable"));
+  assert.match(result.coverage!.livePhotos, /^unknown:/);
+  assert.equal(contentStatus({ ...result, processingMode: "original" }), "partial");
+});
+
+test("Weibo Live Photos require every declared photo identity and FID to be usable and consistent", async t => {
+  const ctx = await context(t), own = livePhoto("own", 1);
+  for (const identity of [{ pid: "own", pic_id: "other" }, { pid: "other", pic_id: "own" }, { pid: "own", pic_id: null }, { fid: null }]) {
+    const saved: string[] = [], result = await acquireWeibo(input(), ctx, deps(post({ pic_ids: ["own"], pic_num: 1, pic_infos: { own: { ...own, ...identity } } }), saved));
+    assert.equal(saved.includes(own.video), false);
+    assert.equal(result.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 1);
+    assert.ok(result.assets.some(asset => asset.role === "video" && asset.status !== "saved"));
+    assert.equal(contentStatus({ ...result, processingMode: "original" }), "partial");
+  }
+});
+
+test("Weibo Live Photo labels retain original photo indices when another image is missing or duplicated", async t => {
+  const ctx = await context(t), data = livePost(); data.pic_infos.photo2.largest.url = data.pic_infos.photo1.largest.url;
+  const result = await acquireWeibo(input(), ctx, deps(data));
+  assert.equal(result.assets.filter(a => a.role === "video" && a.status === "saved").length, 2);
+  assert.deepEqual(result.parts?.map(part => part.title), ["第1张实况照片（动态视频）", "第3张实况照片（动态视频）"]);
+});
+
+test("Weibo Live Photo retries reuse hashed images and companions when only the playback signature changes", async t => {
+  const ctx = await context(t), data = livePost(), originalDeps = deps(data), save = originalDeps.saveAsset!;
+  originalDeps.saveAsset = async (...args) => ({ ...await save(...args), sourceUrl: args[0] });
+  const first = await acquireWeibo(input(), ctx, originalDeps); ctx.existing = first;
+  const changed = livePost(); changed.pic_infos.photo1.video += "&renewed=1"; changed.pic_infos.photo3.video += "&renewed=1";
+  let downloads = 0;
+  const result = await acquireWeibo(input(), ctx, { ...deps(changed), saveAsset: async () => { downloads++; throw new Error("No replacement download allowed"); } });
+  assert.equal(downloads, 0); assert.equal(result.assets.filter(a => a.status === "saved").length, 5);
+  assert.deepEqual(result.assets.map(a => a.sha256), first.assets.map(a => a.sha256));
+});
+
+test("Weibo Live Photo cancellation after the first durable companion never downloads the second", async t => {
+  const ctx = await context(t), controller = new AbortController(), saved: string[] = []; ctx.signal = controller.signal;
+  ctx.onCheckpoint = async record => { if (record.assets.some(a => a.role === "video" && a.status === "saved")) controller.abort(); };
+  const result = await acquireWeibo(input(), ctx, deps(livePost(), saved));
+  assert.deepEqual(saved.filter(url => url.includes("/media/play?")), [livePhoto("photo1", 1).video]);
+  assert.equal(result.assets.filter(a => a.status === "saved").length, 4); assert.equal(result.coverage?.media, "cancelled");
+});
+
+test("Weibo Live Photo count limits explicitly retain a partial motion collection", async t => {
+  const ctx = await context(t), ids = Array.from({ length: 10 }, (_, index) => `photo${index + 1}`);
+  const result = await acquireWeibo(input(), ctx, deps(post({ pic_ids: ids, pic_num: 10, pic_infos: Object.fromEntries(ids.map((id, index) => [id, livePhoto(id, index + 1)])) })));
+  assert.equal(result.assets.filter(a => a.role === "video" && a.status === "saved").length, 9);
+  assert.equal(contentStatus({ ...result, processingMode: "original" }), "partial"); assert.match(result.coverage!.media, /^unknown:/);
+});
+
 test("Weibo numeric MID aliases keep the exact canonical BID identity", async t => {
   const ctx = await context(t), result = await acquireWeibo(input(`https://m.weibo.cn/detail/${mid}`), ctx, deps({ ok: 1, data: post() }));
   assert.equal(result.nativeId, bid); assert.equal(result.canonicalUrl, `https://m.weibo.cn/status/${bid}`);

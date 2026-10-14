@@ -72,6 +72,28 @@ test("download: a changed file cannot reuse the old verified digest", async t =>
   await saved(root, await savePublicAsset(source, root, "video/001", "video", undefined, 32, trusted)); assert.equal(sent.length, 1);
 });
 
+test("download: an official playback redirect preserves the final MOV extension and original bytes", async t => {
+  const root = await directory(t);
+  transport(t, [{ status: 302, headers: { location: "https://cdn.example.com/photo.mov" }, bytes: new Uint8Array() }, { bytes: full, headers: { "content-type": "application/octet-stream", "content-length": "8" } }]);
+  const asset = await savePublicAsset("https://example.com/media/play?livephoto=photo", root, "video/live-photo", "video");
+  await saved(root, asset); assert.equal(asset.path, "video/live-photo.mov");
+});
+
+test("download: QuickTime MIME preserves MOV even when the public URL has no file suffix", async t => {
+  const root = await directory(t); transport(t, [{ bytes: full, headers: { "content-type": "video/quicktime", "content-length": "8" } }]);
+  const asset = await savePublicAsset("https://example.com/media/play", root, "video/live-photo", "video");
+  await saved(root, asset); assert.equal(asset.path, "video/live-photo.mov");
+});
+
+test("download: a two-frame GIF keeps both image descriptors and exactly the original bytes", async t => {
+  const root = await directory(t);
+  const gif = Buffer.from("47494638396101000100800000000000ffffff21f904000a0000002c000000000100010000020244010021f904000a0000002c00000000010001000002024c01003b", "hex");
+  transport(t, [{ bytes: gif, headers: { "content-type": "image/gif", "content-length": String(gif.length) } }]);
+  const asset = await savePublicAsset("https://example.com/image", root, "image/animated", "image");
+  await saved(root, asset, gif); assert.equal(asset.path, "image/animated.gif");
+  assert.equal((await fs.readFile(path.join(root, asset.path!))).filter(byte => byte === 0x2c).length, 2);
+});
+
 for (const disconnect of [undefined, "ECONNRESET"] as const) {
   test(`download: ${disconnect ?? "declared truncation"} resumes only the missing bytes with a strong validator`, async t => {
     const root = await directory(t);

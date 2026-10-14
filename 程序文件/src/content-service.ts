@@ -89,6 +89,8 @@ export async function listSavedContent(runtimeRoot:string,root:string,query="") 
 async function reusableOriginalContent(record:CapturedContent|undefined,input:ContentInput,directory:string):Promise<boolean>{
   if(!record||!["xiaohongshu","wechat_channels","youtube","douyin","weibo","local"].includes(input.platform)||!input.nativeId||contentIdentity(record)!==contentIdentity(input)||record.parts?.some(part=>part.status!=="saved"))return false;
   if(input.platform==="weibo"&&!record.coverage?.body?.startsWith("saved"))return false;
+  // Older mixed posts did not inspect per-photo motion companions. Recheck that declaration once.
+  if(input.platform==="weibo"&&record.assets.some(asset=>asset.role==="image")&&!record.coverage?.livePhotos)return false;
   const localArticle=input.platform==="local"&&record.kind==="article",localImage=input.platform==="local"&&record.kind==="gallery";
   if(localArticle?!record.markdown.trim():!localImage&&!["video","audio"].includes(record.kind))return false;
   const originals=record.assets.filter(asset=>asset.provenance==="original");

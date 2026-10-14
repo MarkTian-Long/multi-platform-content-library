@@ -119,7 +119,7 @@ export function fetchedPublicRedirects(response: Response): readonly string[] { 
 
 function assetExtension(contentType: string, fallback = "bin"): string {
   const type = contentType.split(";", 1)[0].trim().toLowerCase();
-  return ({ "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif", "video/mp4": "mp4", "video/webm": "webm", "text/vtt": "vtt", "application/pdf": "pdf" } as Record<string, string>)[type] ?? fallback;
+  return ({ "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm", "text/vtt": "vtt", "application/pdf": "pdf" } as Record<string, string>)[type] ?? fallback;
 }
 
 const DOWNLOAD_ATTEMPTS = 3;
@@ -236,7 +236,7 @@ export async function savePublicAsset(sourceUrl: string, directory: string, rela
         }
         const total = range?.total ?? announced;
         const offset = bytes;
-        const fromPath = path.extname(new URL(sourceUrl).pathname).replace(/^\./, "").toLowerCase();
+        const fromPath = (path.extname(new URL(finalUrl).pathname) || path.extname(new URL(sourceUrl).pathname)).replace(/^\./, "").toLowerCase();
         const ext = assetExtension(mime ?? "", /^[a-z0-9]{1,8}$/.test(fromPath) ? fromPath : "bin");
         const relativePath = `${prefix}${ext}`;
         const target = await writableFile(root, relativePath);

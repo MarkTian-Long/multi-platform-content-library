@@ -1,5 +1,9 @@
 # 工作区清理记录
 
+## 2026-10-14微博实况补存
+
+本轮动态原件正式补存并验证后，按正式原件大小/SHA核对并移除唯一诊断副本`photo-001.bin`，回收1文件、3,447,318字节。两份正式MOV、3张原图、其他既有资产及任务保留；原始回执在本机`logs/weibo-live-photo-20261014/verification.json`。没有递归删除目录，也没有清理未知恢复材料。
+
 ## 2026-10-14同步收尾
 
 根目录和程序目录README、CHANGELOG、项目说明、操作/MCP文档已按当前功能统一，目录主规范见[directory-conventions.md](directory-conventions.md)。旧开发计划和审查记录继续保持历史身份；本机日志原回执不随GitHub源码同步。

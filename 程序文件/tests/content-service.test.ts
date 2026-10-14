@@ -41,6 +41,23 @@ test("retry restores stable capture paths after readable file names were publish
  },enrich:async record=>record,pdf:async()=>undefined});
  assert.ok(acquired);
 });
+test("legacy Weibo video with photos is rechecked before treating its attachment set as complete",async t=>{
+ const {root}=await fixture(t),id="N4xlMvjhI",url=`https://weibo.com/7827771738/${id}`;
+ const input={platform:"weibo" as const,nativeId:id,url,canonicalUrl:`https://m.weibo.cn/status/${id}`,processing:"original" as const};
+ const job=(await enqueueInputs(root,[input])).find(item=>item.platform==="weibo")!;
+ const seed=path.join(root,"seed-weibo");await fs.mkdir(seed);await fs.writeFile(path.join(seed,"original.mp4"),"previously-verified-video");await fs.writeFile(path.join(seed,"photo.png"),"previously-verified-image");
+ const previous=await saveContent(root,{...input,sourceUrl:url,title:"微博原帖",capturedAt:base.capturedAt,kind:"video",markdown:"旧帖正文",warnings:[],coverage:{body:"saved: full post text",media:"saved: 2 verified target assets",comments:"not_supported"},assets:[{id:"assets/weibo/video-001",role:"video",status:"saved",path:"original.mp4",provenance:"original"},{id:"assets/weibo/image-001",role:"image",status:"saved",path:"photo.png",provenance:"original"}]},seed);
+ let requests=0;
+ t.mock.method(dns,"lookup",async()=>[{address:"93.184.216.34",family:4}]);
+ t.mock.method(globalThis,"fetch",async()=>{requests++;return new Response(JSON.stringify({mblogid:id,idstr:"4910815147462302",text_raw:"已核对的最新正文"}),{headers:{"content-type":"application/json"}});});
+ t.mock.method(chromium,"launchPersistentContext",async()=>{throw new Error("No browser required for the exact official JSON fixture");});
+ await processContentJob(root,root,job,new AbortController().signal,{enrich:async r=>r});
+ assert.equal(requests,1);
+ const saved=(await findContent(root)).find(item=>item.contentId===previous.contentId)!;
+ const manifest=JSON.parse(await fs.readFile(path.join(saved.directory,"content.json"),"utf8"));
+ assert.equal(manifest.markdown,"已核对的最新正文");
+ assert.deepEqual(manifest.assets.map((a:any)=>a.sha256),previous.assets.map(a=>a.sha256));
+});
 test("pipeline persists original content before enrichment fails",async t=>{
  const {root,job}=await fixture(t);await assert.rejects(processContentJob(path.join(root,"runtime"),root,job,new AbortController().signal,{resolve:async i=>i,acquire:async(i,c)=>{await c.onCheckpoint?.(base);return base;},enrich:async()=>{throw new Error("识别失败");},pdf:async()=>undefined}),/识别失败/);
  assert.equal((await findContent(root)).length,1);assert.ok((await getJobs(root))[0].contentId);

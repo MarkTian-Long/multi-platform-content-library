@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { load } from "cheerio";
 import TurndownService from "turndown";
 import { fetchPublic, fetchedPublicUrl, privateAddress, savePublicAsset } from "./content-network.js";
@@ -22,7 +22,7 @@ export interface WeiboDeps extends Pick<AcquisitionDeps, "runTool" | "probeMedia
 }
 type Obj = Record<string, unknown>;
 type Cookie = { domain: string; hostOnly: boolean; path: string; name: string; value: string; secure: boolean; expires: number };
-type Video = { fid?: string; urls: Array<{ url: string; rank: number; bytes?: number }>; duration?: number };
+type Video = { fid?: string; urls: Array<{ url: string; rank: number; bytes?: number }>; duration?: number; photo?: { id: string; index: number } };
 const obj = (value: unknown): Obj => value && typeof value === "object" && !Array.isArray(value) ? value as Obj : {};
 const str = (value: unknown): string => typeof value === "string" ? value : "";
 const identifier = (value: unknown): string => typeof value === "string" ? value : typeof value === "number" && Number.isSafeInteger(value) ? String(value) : "";
@@ -126,16 +126,43 @@ function safeMedia(value: unknown, video: boolean, explicit = false): string | u
     return url.toString();
   } catch { return undefined; }
 }
-function images(post: Obj): { urls: string[]; expected: number } {
+/** Only a video explicitly attached to an own photo can use the Live Photo play endpoint. */
+function livePhotoTarget(value: unknown, fid = ""): { url: string; identity: string } | undefined {
+  const safe = safeMedia(value, true, true); if (!safe) return undefined;
+  const source = new URL(safe); let target = source;
+  if (source.hostname === "video.weibo.com" && source.pathname === "/media/play") {
+    if (source.searchParams.getAll("livephoto").length !== 1 || source.searchParams.getAll("fid").length > 1 || source.searchParams.has("fid") && source.searchParams.get("fid") !== fid) return undefined;
+    const nested = safeMedia(source.searchParams.get("livephoto"), true, true); if (!nested) return undefined;
+    target = new URL(nested);
+  }
+  if (target.protocol !== "https:" || !/(^|\.)(?:sinaimg\.cn|weibocdn\.com)$/.test(target.hostname) || !/\.(?:mov|mp4)$/i.test(target.pathname)) return undefined;
+  if (fid && path.posix.basename(target.pathname).replace(/\.(?:mov|mp4)$/i, "") !== fid) return undefined;
+  if (source !== target && !["us.sinaimg.cn", "livephoto.us.sinaimg.cn"].includes(target.hostname)) return undefined;
+  return { url: safe, identity: target.origin + target.pathname };
+}
+function images(post: Obj): { urls: string[]; expected: number; livePhotos: Video[] } {
   const values: unknown[] = [], infos = obj(post.pic_infos), ids = Array.isArray(post.pic_ids) ? post.pic_ids.map(identifier) : [];
-  const best = (value: unknown) => { const image = obj(value); return [obj(image.largest).url, obj(image.original).url, obj(image.large).url, obj(image.bmiddle).url, image.url].find(v => safeMedia(v, false)); };
-  if (ids.length) for (const id of ids) values.push(best(infos[id]));
-  if (Array.isArray(post.pics)) for (const pic of post.pics) { const image = obj(pic); if (!ids.length || ids.includes(identifier(image.pid ?? image.pic_id))) values.push(best(image)); }
+  const companions = new Map<string, Video>();
+  const best = (value: unknown, index: number, id: string) => {
+    const image = obj(value), declarations = ["pid", "pic_id"].filter(field => field in image).map(field => identifier(image[field])), declaredId = declarations[0] || "";
+    if (str(image.type).toLowerCase() === "livephoto" || typeof image.video === "string" && !!image.video) {
+      const key = id || declaredId || `photo-${index}`, fid = identifier(image.fid);
+      const encrypted = ["has_drm", "encrypted", "isEncrypted", "decode_key", "decrypt_key", "decodeKey"].some(field => image[field]);
+      const bound = declarations.every(value => !!value && value === (id || declaredId)) && (!("fid" in image) || !!fid);
+      const media = !encrypted && bound ? livePhotoTarget(image.video, fid) : undefined;
+      const prior = companions.get(key);
+      if (!prior) companions.set(key, { photo: { id: key, index }, urls: media ? [{ url: media.url, rank: 1 }] : [] });
+      else if (!bound || encrypted) prior.urls = [];
+    }
+    return [obj(image.largest).url, obj(image.original).url, obj(image.large).url, obj(image.bmiddle).url, image.url].find(v => safeMedia(v, false));
+  };
+  if (ids.length) for (const [index, id] of ids.entries()) values.push(best(infos[id], index + 1, id));
+  if (Array.isArray(post.pics)) for (const [index, pic] of post.pics.entries()) { const image = obj(pic), id = identifier(image.pid ?? image.pic_id), ownIndex = ids.indexOf(id); if (!ids.length || ownIndex >= 0) values.push(best(image, ids.length ? ownIndex + 1 : index + 1, id)); }
   const mix = obj(post.mix_media_info);
-  if (Array.isArray(mix.items)) for (const item of mix.items) if (obj(item).type === "pic") values.push(best(obj(item).data));
+  if (Array.isArray(mix.items)) for (const [index, item] of mix.items.entries()) if (obj(item).type === "pic") { const image = obj(obj(item).data), id = identifier(image.pid ?? image.pic_id), ownIndex = ids.indexOf(id); if (!ids.length || ownIndex >= 0) values.push(best(image, ids.length ? ownIndex + 1 : index + 1, id)); }
   const urls = [...new Set(values.map(v => safeMedia(v, false)).filter((v): v is string => !!v))];
   const count = Number(post.pic_num);
-  return { urls, expected: Math.max(urls.length, ids.length, Number.isSafeInteger(count) && count > 0 ? count : 0) };
+  return { urls, expected: Math.max(urls.length, ids.length, Number.isSafeInteger(count) && count > 0 ? count : 0), livePhotos: [...companions.values()] };
 }
 function fidOf(value: Obj): string | undefined {
   const id = identifier(value.oid ?? value.object_id ?? value.fid ?? value.objectid);
@@ -255,6 +282,12 @@ async function saveVerified(url: string, stem: string, role: "image" | "video", 
   const failed = (status: ContentAsset["status"], reason: string): ContentAsset => ({ id: stem, role, status, reason, provenance: "original" });
   try {
     context.signal?.throwIfAborted();
+    const prior = context.existing?.assets.find(asset => asset.id === stem && asset.role === role && asset.status === "saved" && asset.bytes && asset.sha256 && asset.sourceUrl);
+    const sameSource = prior?.sourceUrl === url || role === "video" && !!livePhotoTarget(url) && livePhotoTarget(prior?.sourceUrl)?.identity === livePhotoTarget(url)?.identity;
+    if (prior && sameSource && prior.path?.startsWith(`${stem}.`)) {
+      try { const reused = { ...prior }; const file = await verifiedFile(reused, context, maximum); await inspect(file); context.signal?.throwIfAborted(); return { ...reused, capturePath: reused.path }; }
+      catch (error) { if (context.signal?.aborted) throw error; }
+    }
     transaction = path.dirname(await writableFile(root, `.weibo-downloads/${randomUUID()}/transaction`));
     // A prior final file is never a download target or a trusted file inside this transaction.
     const asset = await (deps.saveAsset ?? savePublicAsset)(url, transaction, stem, role, context.signal, maximum);
@@ -287,6 +320,7 @@ export async function acquireWeibo(input: ContentInput, context: ContentContext,
     const raw = weiboPostReference(input.url), canonical = weiboPostReference(input.canonicalUrl), reference = canonical || raw;
     if (input.platform !== "weibo" || !reference || raw && canonical && raw.nativeId !== canonical.nativeId || input.nativeId && input.nativeId !== reference.nativeId) throw new WeiboFailure("输入不是一致的微博单帖/目标 TV 视频身份");
     record.nativeId = reference.nativeId; record.canonicalUrl = reference.canonicalUrl;
+    current.existing = context.existing?.platform === "weibo" && context.existing.nativeId === reference.nativeId ? context.existing : undefined;
     const request = await officialRequester(current, deps);
     const browserPhases = new Set<"component" | "post">();
     const browserResponses: SocialBrowserSnapshot["responses"] = []; let browserGated = false;
@@ -373,7 +407,8 @@ export async function acquireWeibo(input: ContentInput, context: ContentContext,
     const published = Date.parse(str(post.created_at)); if (Number.isFinite(published)) record.publishedAt = new Date(published).toISOString();
     record.coverage = { ...record.coverage, body: complete ? "saved: full post text" : "unknown: long text truncated", postIdentity: `已核对原帖 ${expectedBid}；原博/推荐/头像/评论未纳入`, media: "not_attempted" };
     if (!complete) record.warnings.push("微博长文未取得完整扩展正文；已保留可取得片段，不标为全文");
-    const pictures = reference.kind === "post" ? images(post) : { urls: [], expected: 0 };
+    const pictures = reference.kind === "post" ? images(post) : { urls: [], expected: 0, livePhotos: [] };
+    const targetVideos = [...selectedVideos, ...pictures.livePhotos];
     record.kind = selectedVideos.length || reference.kind === "video" ? "video" : pictures.expected ? "gallery" : "article";
     await checkpoint(current, record);
     const totalMaximum = Math.min(MEDIA_MAX, deps.maxTotalBytes ?? MEDIA_MAX), videoMaximum = Math.min(MEDIA_MAX, deps.maxVideoBytes ?? MEDIA_MAX);
@@ -390,10 +425,12 @@ export async function acquireWeibo(input: ContentInput, context: ContentContext,
       record.assets.push(asset); await checkpoint(current, record);
     }
     if (pictures.expected > Math.min(pictures.urls.length, MAX_IMAGES)) { record.assets.push({ id: "weibo-images-missing", role: "image", status: "unavailable", provenance: "original", reason: `帖子声明 ${pictures.expected} 张图片，本轮只取得 ${Math.min(pictures.urls.length, MAX_IMAGES)} 个可用目标地址` }); record.warnings.push("原帖图片覆盖未完整，缺失部分已标记"); }
-    record.parts = selectedVideos.length ? [] : undefined;
-    for (const [index, video] of selectedVideos.slice(0, MAX_VIDEOS).entries()) {
-      signal.throwIfAborted(); const stem = `assets/weibo/video-${String(index + 1).padStart(3, "0")}`, partId = `weibo-video-${index + 1}`;
-      let asset: ContentAsset = { id: stem, role: "video", status: "unavailable", provenance: "original", partId, reason: "未取得可安全下载的目标 MP4（分段流/加密/无地址未下载）" }, duration: number | undefined;
+    record.parts = targetVideos.length ? [] : undefined;
+    for (const [index, video] of targetVideos.slice(0, MAX_VIDEOS).entries()) {
+      const photoKey = video.photo ? createHash("sha256").update(video.photo.id).digest("hex").slice(0, 16) : undefined;
+      signal.throwIfAborted(); const stem = photoKey ? `assets/weibo/live-photo-${photoKey}` : `assets/weibo/video-${String(index + 1).padStart(3, "0")}`, partId = photoKey ? `weibo-live-photo-${photoKey}` : `weibo-video-${index + 1}`;
+      const partTitle = video.photo ? `第${video.photo.index}张实况照片（动态视频）` : `${record.title} ${index + 1}`;
+      let asset: ContentAsset = { id: stem, role: "video", status: "unavailable", provenance: "original", partId, reason: video.photo ? "实况照片的配套动态地址缺失、身份不一致或不可安全下载，静态照片已单独保留" : "未取得可安全下载的目标 MP4（分段流/加密/无地址未下载）" }, duration: number | undefined;
       const maximum = Math.min(videoMaximum, totalMaximum - used);
       if (maximum <= 0) asset = { ...asset, status: "skipped", reason: "微博媒体总预算已用完" };
       else for (const candidate of video.urls.filter(item => !item.bytes || item.bytes <= maximum).slice(0, 2)) {
@@ -406,9 +443,11 @@ export async function acquireWeibo(input: ContentInput, context: ContentContext,
         asset = { ...fetched, partId };
         if (asset.status === "saved") { used += asset.bytes!; break; }
       }
-      record.assets.push(asset); record.parts!.push({ id: partId, title: `${record.title} ${index + 1}`, status: asset.status === "saved" ? "saved" : "partial", durationSeconds: duration ?? video.duration, reason: asset.status === "saved" ? undefined : asset.reason }); await checkpoint(current, record);
+      record.assets.push(asset); record.parts!.push({ id: partId, title: partTitle, status: asset.status === "saved" ? "saved" : "partial", durationSeconds: duration ?? video.duration, reason: asset.status === "saved" ? undefined : asset.reason }); await checkpoint(current, record);
     }
-    if (selectedVideos.length > MAX_VIDEOS) { record.warnings.push("单帖视频超过本轮数量上限，未标记全量取得"); record.coverage.media = "unknown: video count exceeds limit"; }
+    const savedLivePhotos = record.assets.filter(asset => asset.id.startsWith("assets/weibo/live-photo-") && asset.status === "saved").length;
+    record.coverage.livePhotos = pictures.livePhotos.length ? `${savedLivePhotos === pictures.livePhotos.length ? "saved" : "unknown"}: ${savedLivePhotos}/${pictures.livePhotos.length} photo motion companions` : "not_present: no declared Live Photos";
+    if (targetVideos.length > MAX_VIDEOS) { record.warnings.push("单帖视频（含实况照片动态片段）超过本轮数量上限，未标记全量取得"); record.coverage.media = "unknown: video count exceeds limit"; }
     else record.coverage.media = record.assets.some(a => a.status !== "saved") ? "unknown: some target media unavailable" : `saved: ${record.assets.filter(a => a.status === "saved").length} verified target assets`;
     await checkpoint(current, record); return record;
   } catch (error) {
