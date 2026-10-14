@@ -182,7 +182,7 @@ async function probe(file: string, context: ContentContext, deps: DouyinDeps): P
 
 /** Save exactly one work, preserving source bytes and rejecting unverified media. */
 export async function acquireDouyin(input: ContentInput, context: ContentContext, deps: DouyinDeps = {}): Promise<CapturedContent> {
-  const content: CapturedContent = { platform: input.platform, nativeId: input.nativeId, sourceUrl: input.url, canonicalUrl: input.canonicalUrl, title: "抖音作品", kind: "video", capturedAt: new Date().toISOString(), markdown: "", assets: [], warnings: [], coverage: { media: "not_attempted", comments: "not_attempted", subtitles: "not_attempted" } };
+  const content: CapturedContent = { platform: input.platform, nativeId: input.nativeId, sourceUrl: input.url, canonicalUrl: input.canonicalUrl, title: "抖音作品", kind: "video", capturedAt: new Date().toISOString(), markdown: "", assets: [], warnings: [], coverage: { media: "not_attempted", comments: "not_supported: native Douyin comments", subtitles: "not_supported: native Douyin subtitles" } };
   const signal = AbortSignal.any([AbortSignal.timeout(10 * 60000), ...(context.signal ? [context.signal] : [])]); const current = { ...context, signal };
   let transaction: string | undefined; let root: string | undefined;
   try {

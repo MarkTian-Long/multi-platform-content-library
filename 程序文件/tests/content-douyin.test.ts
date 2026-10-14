@@ -7,6 +7,7 @@ import { promises as dns } from "node:dns";
 import { acquireDouyin as acquireDouyinModule, type DouyinDeps } from "../src/content-douyin.js";
 import { runContentTool } from "../src/content-tools.js";
 import type { ContentInput, ContentContext } from "../src/content-types.js";
+import {contentStatus} from "../src/content-library.js";
 
 const id = "6961737553342991651";
 const input = { platform: "douyin", nativeId: id, url: `https://www.douyin.com/video/${id}`, canonicalUrl: `https://www.douyin.com/video/${id}` } as ContentInput;
@@ -40,6 +41,13 @@ function transport(t: TestContext, html = state(work)) {
   return calls;
 }
 const probe: DouyinDeps["probeMedia"] = async () => ({ video: true, audio: true, durationSeconds: 19 });
+
+test("Douyin: original mode completes without unsupported native comments or subtitles",async t=>{
+  const current=await context(t);transport(t);const record=await acquireDouyin(input,current,{probeMedia:probe});
+  assert.equal(contentStatus({...record,processingMode:"original"}),"completed");
+  assert.match(record.coverage?.comments??"",/not_supported/);assert.match(record.coverage?.subtitles??"",/not_supported/);
+  assert.equal(contentStatus({...record,processingMode:"full"}),"partial","requested local derivatives still need processing");
+});
 
 test("Douyin: exact public work state preserves description and saves only its verified original video", async t => {
   const current = await context(t); const calls = transport(t); const content = await acquireDouyin(input, current, { probeMedia: probe });

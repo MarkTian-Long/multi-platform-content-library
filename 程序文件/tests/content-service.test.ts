@@ -12,6 +12,23 @@ import { promises as dns } from "node:dns";
 import { chromium } from "playwright-core";
 async function fixture(t:any){const root=await fs.mkdtemp(path.join(os.tmpdir(),"link-service-"));t.after(()=>fs.rm(root,{recursive:true,force:true}));const [job]=await enqueueInputs(root,[{platform:"web",url:"https://example.com/article",canonicalUrl:"https://example.com/article"}]);return {root,job};}
 const base:CapturedContent={platform:"web",sourceUrl:"https://example.com/article",canonicalUrl:"https://example.com/article",title:"示例",kind:"article",capturedAt:"2026-09-06T00:00:00Z",markdown:"原始文字",assets:[],warnings:[]};
+
+test("retrying a verified Douyin original normalizes legacy unsupported extras without acquisition",async t=>{
+ const {root}=await fixture(t),id="6961737553342991651",url=`https://www.douyin.com/video/${id}`;
+ const input={platform:"douyin" as const,nativeId:id,url,canonicalUrl:url,processing:"original" as const};
+ const job=(await enqueueInputs(root,[input])).find(item=>item.platform==="douyin")!;
+ const seed=path.join(root,"seed-douyin");await fs.mkdir(seed);await fs.writeFile(path.join(seed,"original.mp4"),"previously-verified-douyin-video");
+ const record:CapturedContent={...input,sourceUrl:url,title:"已保存抖音作品",capturedAt:base.capturedAt,kind:"video",markdown:"原始作品说明",warnings:[],coverage:{body:"saved: exact-work original description",media:"saved: 1 verified original video",comments:"not_attempted",subtitles:"not_attempted"},parts:[{id,title:"已保存抖音作品",status:"saved",durationSeconds:19}],assets:[{id:"video/001",role:"video",status:"saved",path:"original.mp4",partId:id,provenance:"original"}]};
+ const previous=await saveContent(root,record,seed);let requests=0;
+ t.mock.method(globalThis,"fetch",async()=>{requests++;throw new Error("no acquisition during verified original reuse");});
+ t.mock.method(chromium,"launchPersistentContext",async()=>{throw new Error("no browser during verified original reuse");});
+ const result=await processContentJob(root,root,job,new AbortController().signal,{enrich:async r=>r});
+ assert.equal(requests,0);assert.equal(result.state,"completed");
+ const saved=(await findContent(root)).find(item=>item.contentId===previous.contentId)!;
+ const manifest=JSON.parse(await fs.readFile(path.join(saved.directory,"content.json"),"utf8"));
+ assert.equal(manifest.assets.find((asset:any)=>asset.role==="video").sha256,previous.assets.find(asset=>asset.role==="video")!.sha256);
+ assert.match(manifest.coverage.comments,/not_supported/);
+});
 test("retry restores stable capture paths after readable file names were published",async t=>{
  const {root,job}=await fixture(t);const id=contentIdentity(base),directory=path.join(root,"items",id),savedPath="视频/原片.mp4",capturePath="media/original-id/video.mp4";
  await fs.mkdir(path.join(directory,"视频"),{recursive:true});await fs.writeFile(path.join(directory,savedPath),"original-media");

@@ -103,3 +103,9 @@
 19:32匿名新编译CLI复测使用隔离运行根，仅保存既有本机代理，清除代理环境、没有Cookie：初始“到期429”等待是明确人工夹具，并非声称真实平台429已解除；新CLI进程装载waiting后执行`work --scheduled`，一次真实公开样本恢复下载/合并/入库，任务completed，视频**744,412字节**、SHA`a521d584e2ad7a8afb39899fe2a9cbdeecbda46c6599a69f15453c72283b60f9`、完整解码0，真实成功后共享预算清除。worker**33,692ms**，阅读页存在；所有临时原件/运行根/隔离库归属及无链接检查后已清理。`youtube-retry-live.json`明确区分模拟初始等待与真实下载，不将该成功当作长期解除429或人工验证码成功。
 
 最终全量**579/579**、0失败/取消/跳过、**19,049.217ms**，类型/构建退出0；**150源码**检查前后SHA相同，正式**595文件**大小/SHA全部不变。`youtube-retry-full-tests-final.log`、`youtube-retry-typecheck/build.log`、`youtube-retry-source-before/after.json`及`youtube-retry-formal-before/after.json`在`logs/platform-coverage-20261014/`。本轮最终回执与恢复ZIP回读证据见同目录`youtube-retry-verification.json`；此前youtube-improvement-verification保持历史身份。现有窗口需重开载入新脚本，已有MCP进程需重启加载新编译代码。
+
+## 用户最终微博与抖音样本（已完成）
+
+源码初次同步后，用户补充微博QrPhU2TWO和抖音Nx6Q2IX1ibQ供最终验收。实际编译CLI原件模式入队/worker/正式入库完成：微博为图文，正文及3原图completed；抖音视频227,954,243字节/1197.687596秒，完整解码0。此前12任务不变，旧595文件除队列增加两条任务外保留。
+
+抖音原件因未开放原生字幕/评论误标partial，新增两项RED后修复；旧已核验原件重试仅归一旧not_attempted字段，保持saved状态及源校验/取消边界。实际禁用下载器重试1,857ms、completed，原视频SHA不变。定向及限定独立41/41通过，四文件SHA不变、无未决P1/P2；最终581/581、类型/构建0、150源码前后SHA相同。详细来源、模拟/真实边界及本机证据见[用户样本续验](../reviews/2026-10-14-user-social-samples.md)。修复与说明继续同步main，用户媒体与本机回执保留在资料库/logs，不上传GitHub。

@@ -135,6 +135,7 @@ export async function processContentJob(runtimeRoot:string,root:string,job:Conte
     context.onProgress?.("复用已核验的原始资料，补充本地资料");
     record={...existing!,assets:existing!.assets.map(asset=>({...asset})),warnings:[...existing!.warnings],coverage:{...existing!.coverage}};
     if(input.platform==="youtube"){record.coverage!.access="available";delete record.coverage!.retryAfter;}
+    if(input.platform==="douyin")for(const key of ["comments","subtitles"])if(record.coverage![key]==="not_attempted")record.coverage![key]=`not_supported: native Douyin ${key}`;
   }else if(!deps.acquire&&local){
     const {importLocalFile}=await import("./content-local-import.js");
     const imported=await importLocalFile(input.localPath!,{...context,onCheckpoint:undefined,explicitPath:input.localPath!,maxTextBytes:4*1024*1024,maxMediaBytes:2*1024*1024*1024,...(input.localTextEncoding?{textEncoding:input.localTextEncoding}:{})});
