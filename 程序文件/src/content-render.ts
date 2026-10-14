@@ -54,8 +54,13 @@ function coverageNotes(item:ContentManifest):string[] {
 function assetBlock(asset:ContentAsset,files:Set<string>):string {
  const href=asset.path&&files.has(asset.path)?local(asset.path):"";
  const caption=`${roles[asset.role]||asset.role}${asset.label?` · ${asset.label}`:""}`;
- const result=[statuses[asset.status]||asset.status,origins[asset.provenance??""],asset.reason].filter(Boolean).join(" · ");
- const media=asset.status==="saved"&&href?(["image","cover","frame"].includes(asset.role)?`<a href="${html(href)}"><img loading="lazy" src="${html(href)}" alt="${html(caption)}"></a>`:asset.role==="video"?`<video controls preload="metadata" src="${html(href)}"></video>`:asset.role==="audio"?`<audio controls preload="none" src="${html(href)}"></audio>`:`<a href="${html(href)}">打开${html(roles[asset.role]||"文件")}</a>`):"";
+ const quality=asset.quality, container=/\.(heic|heif)$/i.exec(asset.path||"")?.[1].toUpperCase();
+ const dimensions=quality?.width&&quality.height?`${quality.width} × ${quality.height}`:"";
+ const watermark=quality?quality.watermark==="none"?"平台标记无水印":quality.watermark==="present"?"来源版本带水印":"水印状态未确认":"";
+ const version=quality?.rendition==="original"?"原对象文件":quality?.rendition==="preview"?"网页预览，原图另存":quality?"平台提供版本":"";
+ const resolution=quality?.resolution==="smaller_than_source"?"小于来源声明尺寸":quality?.resolution==="matches_source"?"达到来源声明尺寸":"";
+ const result=[statuses[asset.status]||asset.status,origins[asset.provenance??""],container,dimensions,version,watermark,resolution,asset.reason].filter(Boolean).join(" · ");
+ const media=asset.status==="saved"&&href?(["image","cover","frame"].includes(asset.role)?container?`<a href="${html(href)}">打开 ${html(container)} 原文件</a><p class="meta">原文件未转码；可使用支持该格式的图片软件打开。</p>`:`<a href="${html(href)}"><img loading="lazy" src="${html(href)}" alt="${html(caption)}"></a>`:asset.role==="video"?`<video controls preload="metadata" src="${html(href)}"></video>`:asset.role==="audio"?`<audio controls preload="none" src="${html(href)}"></audio>`:`<a href="${html(href)}">打开${html(roles[asset.role]||"文件")}</a>`):"";
  return `<section class="asset"><h3>${html(caption)}</h3><p class="meta">${html(result)}</p>${media}</section>`;
 }
 

@@ -2,7 +2,7 @@ import type { CapturedContent, ContentContext, ContentInput } from "./content-ty
 import type { ContentToolRunResult } from "./content-tools.js";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { load } from "cheerio";
 import { douyinWorkReference } from "./content-social-reference.js";
 import { fetchPublic, fetchedPublicUrl, publicHttpUrl, savePublicAsset } from "./content-network.js";
@@ -10,7 +10,8 @@ import { atomicReplace, containedFile, ensureDirectory, fileHash, publicValue, w
 import { runContentTool } from "./content-tools.js";
 import { isPathWithin } from "./url-policy.js";
 import { captureSocialBrowser, SocialBrowserError, socialBrowserJsonEndpoint, type SocialBrowserSnapshot } from "./content-social-browser.js";
-import type { PhotoMedia, PhotoMediaDeps } from "./content-photo-media.js";
+import type { MediaCandidate, PhotoMedia, PhotoMediaDeps } from "./content-photo-media.js";
+import { prioritizeMediaCandidates } from "./content-media-quality.js";
 
 export interface DouyinDeps extends PhotoMediaDeps {
   ytDlpPath?: string;
@@ -23,7 +24,9 @@ export interface DouyinDeps extends PhotoMediaDeps {
 
 export const DOUYIN_MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_PAGE_BYTES = 6 * 1024 * 1024;
-type Snapshot = { id: string; title?: string; description: string; author?: string; duration?: number; videoUrl?: string; images: boolean; photos?: PhotoMedia[]; publishedAt?: string };
+type MotionProtection = { ids: string[]; urls: string[] };
+type DouyinPhoto = PhotoMedia & { motionResourceId?: string; motionDeclaration?: MotionProtection };
+type Snapshot = { id: string; title?: string; description: string; author?: string; duration?: number; videoUrl?: string; images: boolean; photos?: DouyinPhoto[]; motionProtection?: MotionProtection; publishedAt?: string };
 class DouyinFailure extends Error { constructor(message: string, readonly status: "failed" | "unavailable" | "login_required" | "missing_dependency" = "failed") { super(message); } }
 
 function address(value: unknown): string | undefined {
@@ -39,21 +42,92 @@ function exactDeclaredWork(value: Record<string, unknown>, expectedId: string): 
   for (const key of ["aweme_id", "awemeId"]) if (value[key] !== undefined && value[key] !== null && value[key] !== expectedId) throw new DouyinFailure("作品或照片声明的抖音作品身份不匹配，未采集", "unavailable");
 }
 
+function positiveInteger(value: unknown, maximum = Number.MAX_SAFE_INTEGER): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= maximum ? value : undefined; }
+function watermarkFlag(value: Record<string, unknown> | undefined): MediaCandidate["watermark"] | undefined {
+  const flags = [value?.has_watermark, value?.is_watermark];
+  if (flags.some(flag => flag === true || flag === 1)) return "present";
+  if (flags.some(flag => flag === false || flag === 0)) return "none";
+  return undefined;
+}
+function candidateWatermark(url: string, owners: (Record<string, unknown> | undefined)[], inherited?: MediaCandidate["watermark"]): Pick<MediaCandidate, "watermark" | "evidence"> {
+  const parsed = new URL(url);
+  if (/(?:~|%7e)tplv-dy-water-v2(?::|%3a)/i.test(parsed.pathname) || /\/playwm(?:\/|$)/i.test(parsed.pathname) || parsed.searchParams.getAll("watermark").some(value => value === "1" || value === "true")) return { watermark: "present", evidence: "known_template" };
+  const flags = [...owners.map(watermarkFlag), inherited];
+  if (flags.includes("present")) return { watermark: "present", evidence: "platform_flag" };
+  if (flags.includes("none")) return { watermark: "none", evidence: "platform_flag" };
+  return { watermark: "unknown" };
+}
+function imageCandidates(image: Record<string, unknown> | undefined): MediaCandidate[] {
+  const dimensions = { width: positiveInteger(image?.width, 32768), height: positiveInteger(image?.height, 32768) };
+  return prioritizeMediaCandidates(["url_list", "download_url_list"].flatMap(key => addresses(image?.[key]).map(url => ({
+    url, source: "provided" as const, rendition: key === "url_list" ? "playback" as const : "download" as const,
+    ...candidateWatermark(url, [image]), ...dimensions,
+  }))));
+}
+function protectedMotion(value: Record<string, unknown> | undefined): boolean { return !!value && ["has_drm", "is_drm", "drm"].some(key => !!value[key]); }
+function motionCandidates(video: Record<string, unknown> | undefined, expectedId: string): { candidates: MediaCandidate[]; resourceId?: string; conflict: boolean; protected: boolean; declarations: MotionProtection } {
+  const streams: { address: Record<string, unknown>; rendition: "playback" | "download"; bitrate?: Record<string, unknown> }[] = [];
+  const keys = ["play_addr_h264", "play_addr", "play_addr_265", "play_addr_bytevc1", "download_addr"];
+  let gated = protectedMotion(video);
+  const add = (owner: Record<string, unknown> | undefined, bitrate?: Record<string, unknown>) => {
+    gated ||= protectedMotion(owner);
+    for (const key of keys) { const stream = record(owner?.[key]); if (stream) { exactDeclaredWork(stream, expectedId); gated ||= protectedMotion(stream); streams.push({ address: stream, rendition: key === "download_addr" ? "download" : "playback", bitrate }); } }
+  };
+  add(video);
+  if (Array.isArray(video?.bit_rate)) for (const value of video.bit_rate.slice(0, 128)) { const bitrate = record(value); if (bitrate) { exactDeclaredWork(bitrate, expectedId); add(bitrate, bitrate); } }
+  // URI is the video resource identity, independent of the owning image's URI.
+  // Missing URL lists still declare an identity and cannot be replaced by another video's stream.
+  const ids = new Set(streams.map(stream => typeof stream.address.uri === "string" ? stream.address.uri.trim() : "").filter(Boolean));
+  const declarations = { ids: [...ids], urls: [...new Set(streams.flatMap(stream => addresses(stream.address.url_list)))] };
+  if (gated || ids.size > 1) return { candidates: [], resourceId: ids.size === 1 ? ids.values().next().value : undefined, conflict: ids.size > 1, protected: gated, declarations };
+  const parentFlag = watermarkFlag(video), duration = durationSeconds(video?.duration);
+  const candidates = streams.flatMap(stream => addresses(stream.address.url_list).map(url => ({
+    url, source: "provided" as const, rendition: stream.rendition,
+    resourceId: typeof stream.address.uri === "string" && stream.address.uri.trim() ? createHash("sha256").update(JSON.stringify(["douyin", expectedId, "motion", stream.address.uri.trim()])).digest("hex") : undefined,
+    ...candidateWatermark(url, [stream.address, stream.bitrate], parentFlag === "none" ? "none" : stream.rendition === "download" ? parentFlag : undefined),
+    width: positiveInteger(stream.address.width, 32768) ?? positiveInteger(stream.bitrate?.width, 32768) ?? positiveInteger(video?.width, 32768),
+    height: positiveInteger(stream.address.height, 32768) ?? positiveInteger(stream.bitrate?.height, 32768) ?? positiveInteger(video?.height, 32768),
+    bitrate: positiveInteger(stream.bitrate?.bit_rate) ?? positiveInteger(stream.address.bit_rate), durationSeconds: duration,
+  })));
+  return { candidates: prioritizeMediaCandidates(candidates), resourceId: ids.values().next().value, conflict: false, protected: false, declarations };
+}
+
+/** Keep explicit protection attached to every known alias and across metadata supplements. */
+function applyMotionProtection(photos: DouyinPhoto[], prior?: MotionProtection): { photos: DouyinPhoto[]; protection: MotionProtection } {
+  const ids = new Set(prior?.ids), urls = new Set(prior?.urls);
+  const blocked = (photo: DouyinPhoto) => !!photo.motionProtected || !!photo.motionDeclaration?.ids.some(id => ids.has(id)) || !!photo.motionDeclaration?.urls.some(url => urls.has(url));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const photo of photos) if (blocked(photo)) {
+      for (const id of photo.motionDeclaration?.ids ?? []) if (!ids.has(id)) { ids.add(id); changed = true; }
+      for (const url of photo.motionDeclaration?.urls ?? []) if (!urls.has(url)) { urls.add(url); changed = true; }
+    }
+  }
+  return { protection: { ids: [...ids], urls: [...urls] }, photos: photos.map(photo => !blocked(photo) ? photo : {
+    ...photo, motionProtected: true, motionExpected: true, motionCandidates: [], motionUrls: [],
+    reason: /受保护|加密/.test(photo.reason ?? "") ? photo.reason : [photo.reason, "该照片动态原视频受保护，未执行解密或采集"].filter(Boolean).join("；"),
+  }) };
+}
+
 /** The official detail's ordered images array owns both members of each photo pair. */
-function rawPhotos(value: unknown[], expectedId: string): PhotoMedia[] {
+function rawPhotos(value: unknown[], expectedId: string): DouyinPhoto[] {
   if (value.length > 500) throw new DouyinFailure("图集照片数量超过读取上限，未采集", "unavailable");
   return value.map((value, offset) => {
     const image = record(value); const video = record(image?.video);
     if (image) exactDeclaredWork(image, expectedId);
     if (video) exactDeclaredWork(video, expectedId);
-    const imageUrls = addresses(image?.url_list);
-    const protectedMotion = !!video && ["has_drm", "is_drm", "drm"].some(key => !!video[key]);
-    const motionUrls = protectedMotion ? [] : [...new Set(["play_addr_h264", "play_addr", "download_addr"].flatMap(key => addresses(record(video?.[key])?.url_list)))];
+    const images = imageCandidates(image), imageUrls = images.map(candidate => candidate.url);
+    const motion = motionCandidates(video, expectedId);
+    const motionUrls = motion.candidates.map(candidate => candidate.url);
     const motionExpected = !!motionUrls.length || !!video && Object.keys(video).length > 0 || image?.live_photo_type !== undefined && image.live_photo_type !== null && image.live_photo_type !== 0 && image.live_photo_type !== "0" || image?.clip_type === 5 || image?.clip_type === "5";
-    const reason = protectedMotion ? "该照片动态原视频受保护，未执行解密或采集" : !image ? "该序号的原照片数据缺失或格式未知" : undefined;
+    const reason = motion.protected ? "该照片动态原视频受保护，未执行解密或采集" : motion.conflict ? `第${offset + 1}张照片动态视频资源身份不一致，未混用动态` : !image ? "该序号的原照片数据缺失或格式未知" : undefined;
     // uri identifies the original image resource; renderer image_id fields use a different namespace.
     const uri = typeof image?.uri === "string" ? image.uri.trim() : "";
-    return { id: uri ? `uri:${uri}` : `photo-${String(offset + 1).padStart(3, "0")}`, index: offset + 1, imageUrls, motionUrls, motionExpected, ...(durationSeconds(video?.duration) ? { durationSeconds: durationSeconds(video?.duration) } : {}), ...(reason ? { reason } : {}) };
+    return { id: uri ? `uri:${uri}` : `photo-${String(offset + 1).padStart(3, "0")}`, index: offset + 1, imageUrls, motionUrls, imageCandidates: images, motionCandidates: motion.candidates, motionExpected,
+      motionDeclaration: motion.declarations, ...(motion.protected ? { motionProtected: true } : {}), ...(motion.resourceId ? { motionResourceId: motion.resourceId } : {}),
+      ...(positiveInteger(image?.width, 32768) ? { width: positiveInteger(image?.width, 32768) } : {}), ...(positiveInteger(image?.height, 32768) ? { height: positiveInteger(image?.height, 32768) } : {}),
+      ...(durationSeconds(video?.duration) ? { durationSeconds: durationSeconds(video?.duration) } : {}), ...(reason ? { reason } : {}) };
   });
 }
 
@@ -70,8 +144,9 @@ function rawWork(value: unknown, expectedId: string): Snapshot | undefined {
   const duration = typeof video?.duration === "number" && Number.isFinite(video.duration) && video.duration > 0 ? video.duration / 1000 : undefined;
   const timestamp = typeof item.create_time === "number" && Number.isFinite(item.create_time) && item.create_time > 0 ? new Date(item.create_time * 1000) : undefined;
   const photos = Array.isArray(item.images) ? rawPhotos(item.images, expectedId) : undefined;
+  const protectedPhotos = photos ? applyMotionProtection(photos) : undefined;
   const images = !!photos?.length || [2, 68].includes(item.aweme_type);
-  return { id: expectedId, description: typeof item.desc === "string" ? item.desc.trim() : "", author: typeof item.author?.nickname === "string" ? item.author.nickname.trim().slice(0, 240) : undefined, duration, videoUrl, images, ...(photos ? { photos } : {}), publishedAt: timestamp && Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : undefined };
+  return { id: expectedId, description: typeof item.desc === "string" ? item.desc.trim() : "", author: typeof item.author?.nickname === "string" ? item.author.nickname.trim().slice(0, 240) : undefined, duration, videoUrl, images, ...(protectedPhotos ? { photos: protectedPhotos.photos, motionProtection: protectedPhotos.protection } : {}), publishedAt: timestamp && Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : undefined };
 }
 
 function stateCandidates(value: unknown): unknown[] {
@@ -117,7 +192,7 @@ function completeVideo(snapshot: Snapshot | undefined): boolean { return !!snaps
 const photoIdentityConflict = (photo: PhotoMedia): boolean => /资源身份.*不一致/.test(photo.reason ?? "");
 function completePhotos(snapshot: Snapshot | undefined): boolean { return !!snapshot?.images && !!snapshot.photos?.length && snapshot.photos.every(photo => !photoIdentityConflict(photo) && !!photo.imageUrls.length && (!photo.motionExpected || !!photo.motionUrls.length)); }
 
-function enrichPhotos(previous: PhotoMedia[] | undefined, next: PhotoMedia[] | undefined): PhotoMedia[] | undefined {
+function enrichPhotos(previous: DouyinPhoto[] | undefined, next: DouyinPhoto[] | undefined): DouyinPhoto[] | undefined {
   if (!previous?.length) return next ?? previous;
   if (!next?.length) return previous;
   const count = Math.max(previous.length, next.length);
@@ -133,14 +208,28 @@ function enrichPhotos(previous: PhotoMedia[] | undefined, next: PhotoMedia[] | u
     }
     const id = afterUri ? after.id : before.id;
     const protectedReason = [before.reason, after.reason].find(reason => /受保护|加密/.test(reason ?? ""));
-    return { ...before, ...after, id, imageUrls: [...new Set([...after.imageUrls, ...before.imageUrls])], motionUrls: protectedReason ? [] : [...new Set([...after.motionUrls, ...before.motionUrls])], motionExpected: before.motionExpected || after.motionExpected, durationSeconds: after.durationSeconds ?? before.durationSeconds, reason: protectedReason ?? after.reason };
+    const conflict = before.motionResourceId && after.motionResourceId && before.motionResourceId !== after.motionResourceId;
+    const conflictReason = conflict ? `第${before.index}张照片动态视频资源身份与补充来源不一致，已保留原图，未混用动态` : [before.reason, after.reason].find(reason => /资源身份.*不一致/.test(reason ?? ""));
+    const combine = (role: "image" | "motion") => prioritizeMediaCandidates([after, before].flatMap(photo => {
+      const candidates = role === "image" ? photo.imageCandidates : photo.motionCandidates;
+      return candidates ?? (role === "image" ? photo.imageUrls : photo.motionUrls).map(url => ({ url, source: "provided" as const, rendition: "unknown" as const, watermark: "unknown" as const }));
+    }));
+    const images = combine("image"), motions = protectedReason || conflictReason || before.motionProtected || after.motionProtected ? [] : combine("motion");
+    return { ...before, ...after, id, imageCandidates: images, motionCandidates: motions, imageUrls: images.map(candidate => candidate.url), motionUrls: motions.map(candidate => candidate.url),
+      motionResourceId: after.motionResourceId ?? before.motionResourceId, motionProtected: before.motionProtected || after.motionProtected,
+      motionDeclaration: { ids: [...new Set([...(before.motionDeclaration?.ids ?? []), ...(after.motionDeclaration?.ids ?? [])])], urls: [...new Set([...(before.motionDeclaration?.urls ?? []), ...(after.motionDeclaration?.urls ?? [])])] },
+      width: after.width ?? before.width, height: after.height ?? before.height,
+      motionExpected: before.motionExpected || after.motionExpected, durationSeconds: after.durationSeconds ?? before.durationSeconds, reason: protectedReason ?? conflictReason ?? after.reason };
   });
 }
 
 /** Only missing fields are enriched; an exact original description is never erased. */
 function enrichSnapshot(previous: Snapshot | undefined, next: Snapshot): Snapshot {
   if (!previous) return next;
-  return { ...previous, title: previous.title || next.title, description: previous.description || next.description, author: previous.author || next.author, publishedAt: previous.publishedAt || next.publishedAt, duration: next.duration || previous.duration, videoUrl: next.videoUrl || previous.videoUrl, images: previous.images || next.images, photos: enrichPhotos(previous.photos, next.photos) };
+  const photos = enrichPhotos(previous.photos, next.photos);
+  const protection = { ids: [...new Set([...(previous.motionProtection?.ids ?? []), ...(next.motionProtection?.ids ?? [])])], urls: [...new Set([...(previous.motionProtection?.urls ?? []), ...(next.motionProtection?.urls ?? [])])] };
+  const protectedPhotos = photos ? applyMotionProtection(photos, protection) : undefined;
+  return { ...previous, title: previous.title || next.title, description: previous.description || next.description, author: previous.author || next.author, publishedAt: previous.publishedAt || next.publishedAt, duration: next.duration || previous.duration, videoUrl: next.videoUrl || previous.videoUrl, images: previous.images || next.images, photos: protectedPhotos?.photos, motionProtection: protectedPhotos?.protection };
 }
 
 function browserWork(browser: SocialBrowserSnapshot, expectedId: string): Snapshot | undefined {

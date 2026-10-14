@@ -325,6 +325,204 @@ test("Douyin photo URI: the same declared resource at different positions preser
   assert.equal(contentStatus({ ...record, processingMode: "original" }), "completed");
 });
 
+test("Douyin quality: image candidates retain signed URLs, declared pixels and watermarked download fallback", () => {
+  const webp = "https://p26-sign.douyinpic.com/tos-cn-i-0813/photo-A~tplv-dy-aweme-images:q75.webp?x-signature=Fixture%2B%2F%3D&x-expires=123";
+  const jpeg = webp.replace(".webp?", ".jpeg?");
+  const download = "https://p11-sign.douyinpic.com/tos-cn-i-0813/photo-A~tplv-dy-water-v2:user:2160:3840.webp?sig=Fixture%2F%3D";
+  const snapshot = extractDouyinWork(state(galleryWork([{ uri: "tos-cn-i-0813/photo-A", width: 2160, height: 3840, url_list: [webp, jpeg], download_url_list: [download] }])), id);
+  const photo = snapshot?.photos?.[0]; assert(photo);
+  assert.equal(photo.width, 2160); assert.equal(photo.height, 3840);
+  assert.deepEqual(photo.imageUrls, [webp, jpeg, download]);
+  assert.deepEqual(photo.imageCandidates?.map(candidate => [candidate.url, candidate.source, candidate.rendition, candidate.watermark, candidate.evidence, candidate.width, candidate.height]), [
+    [webp, "provided", "playback", "unknown", undefined, 2160, 3840],
+    [jpeg, "provided", "playback", "unknown", undefined, 2160, 3840],
+    [download, "provided", "download", "present", "known_template", 2160, 3840],
+  ]);
+});
+
+test("Douyin quality: a known watermark download cannot outrank an unmarked provided image", () => {
+  const clean = photoUrls[0], marked = "https://p11-sign.douyinpic.com/photo~tplv-dy-water-v2:user:2160:3840.jpeg?watermark=1";
+  const snapshot = extractDouyinWork(state(galleryWork([{ url_list: [marked, clean], download_url_list: [marked], width: 2160, height: 3840 }])), id);
+  assert.deepEqual(snapshot?.photos?.[0].imageUrls, [clean, marked]);
+  assert.deepEqual(snapshot?.photos?.[0].imageCandidates?.map(candidate => [candidate.url, candidate.watermark]), [[clean, "unknown"], [marked, "present"]]);
+});
+
+test("Douyin quality: the highest motion pixels win across codecs and equal pixels use bitrate", () => {
+  const high = "https://media.example.com/high-hevc.mp4", highestRate = "https://media.example.com/high-hevc-bitrate.mp4", low = "https://media.example.com/low-h264.mp4";
+  const snapshot = extractDouyinWork(state(galleryWork([{ uri: "image-resource", url_list: [photoUrls[0]], video: {
+    duration: 2967, has_watermark: false,
+    play_addr_h264: { uri: "motion-resource", width: 720, height: 960, url_list: [low] },
+    bit_rate: [
+      { bit_rate: 2000000, is_h265: 1, play_addr: { uri: "motion-resource", width: 1440, height: 1920, url_list: [high] } },
+      { bit_rate: 3000000, is_h265: 1, play_addr: { uri: "motion-resource", width: 1440, height: 1920, url_list: [highestRate] } },
+    ],
+  } }])), id);
+  assert.deepEqual(snapshot?.photos?.[0].motionUrls, [highestRate, high, low]);
+  assert.deepEqual(snapshot?.photos?.[0].motionCandidates?.map(candidate => [candidate.url, candidate.width, candidate.height, candidate.bitrate, candidate.watermark, candidate.evidence, candidate.durationSeconds]), [
+    [highestRate, 1440, 1920, 3000000, "none", "platform_flag", 2.967],
+    [high, 1440, 1920, 2000000, "none", "platform_flag", 2.967],
+    [low, 720, 960, undefined, "none", "platform_flag", 2.967],
+  ]);
+});
+
+test("Douyin quality: a shared address keeps its higher bitrate metadata when a default stream aliases it", () => {
+  const shared = "https://media.example.com/shared-motion.mp4", alternate = "https://media.example.com/alternate-motion.mp4";
+  const snapshot = extractDouyinWork(state(galleryWork([{ url_list: [photoUrls[0]], video: {
+    has_watermark: false,
+    play_addr_h264: { uri: "motion-resource", width: 720, height: 960, url_list: [shared] },
+    bit_rate: [
+      { bit_rate: 3000000, play_addr: { uri: "motion-resource", width: 720, height: 960, url_list: [shared] } },
+      { bit_rate: 2500000, play_addr: { uri: "motion-resource", width: 720, height: 960, url_list: [alternate] } },
+    ],
+  } }])), id);
+  assert.deepEqual(snapshot?.photos?.[0].motionUrls, [shared, alternate]);
+  assert.equal(snapshot?.photos?.[0].motionCandidates?.[0].bitrate, 3000000);
+});
+
+test("Douyin quality: explicit video identities stay opaque and stable across signed URLs without inventing missing IDs", () => {
+  const photo = (uri: string | undefined, url: string, imageUri = "image-resource") => extractDouyinWork(state(galleryWork([{ uri: imageUri, url_list: [photoUrls[0]], video: { play_addr: { ...(uri ? { uri } : {}), url_list: [url] } } }])), id)?.photos?.[0];
+  const first = photo("video-resource-A", `${motionUrl}&refresh=old`), renewed = photo("video-resource-A", `${motionUrl}&refresh=new`);
+  const changed = photo("video-resource-B", motionUrl), absent = photo(undefined, motionUrl);
+  const originalId = first?.motionCandidates?.[0].resourceId; assert.match(originalId ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(renewed?.motionCandidates?.[0].resourceId, originalId);
+  assert.notEqual(changed?.motionCandidates?.[0].resourceId, originalId);
+  assert.equal(absent?.motionCandidates?.[0].resourceId, undefined);
+  assert.equal(photo("video-resource-A", motionUrl, "another-image-resource")?.motionCandidates?.[0].resourceId, originalId, "image and video URI namespaces remain independent");
+});
+
+test("Douyin quality: video watermark flags keep false, true-download-only and unknown scopes distinct", () => {
+  const download = "https://media.example.com/download-motion.mp4";
+  for (const [flag, playbackMark, downloadMark] of [[false, "none", "none"], [true, "unknown", "present"], [undefined, "unknown", "unknown"]] as const) {
+    const snapshot = extractDouyinWork(state(galleryWork([{ url_list: [photoUrls[0]], video: {
+      ...(flag !== undefined ? { has_watermark: flag } : {}), duration: 2967,
+      play_addr: { uri: "motion-resource", width: 720, height: 960, url_list: [motionUrl] },
+      download_addr: { uri: "motion-resource", width: 720, height: 960, url_list: [download] },
+    } }])), id);
+    const candidates = snapshot?.photos?.[0].motionCandidates; assert(candidates);
+    assert.equal(candidates.find(candidate => candidate.url === motionUrl)?.watermark, playbackMark);
+    assert.equal(candidates.find(candidate => candidate.url === download)?.watermark, downloadMark);
+    assert.equal(candidates.find(candidate => candidate.url === download)?.rendition, "download");
+    assert.equal(candidates.find(candidate => candidate.url === download)?.evidence, flag === undefined ? undefined : "platform_flag");
+  }
+});
+
+test("Douyin quality: address flags and literal watermarked paths win without rewriting source URLs", () => {
+  const markedPath = "https://www.iesdouyin.com/aweme/v1/playwm/?video_id=motion-resource&ratio=720p&signature=Fixture%2B%3D";
+  const markedQuery = "https://media.example.com/query-motion.mp4?watermark=1&signature=Fixture%2F%3D";
+  const clean = "https://media.example.com/clean-motion.mp4?signature=Fixture%2B%3D";
+  const snapshot = extractDouyinWork(state(galleryWork([{ url_list: [photoUrls[0]], video: {
+    has_watermark: true, duration: 2967,
+    play_addr_h264: { uri: "motion-resource", width: 2160, height: 2880, is_watermark: false, url_list: [markedPath, markedQuery] },
+    play_addr: { uri: "motion-resource", width: 720, height: 960, has_watermark: false, url_list: [clean] },
+  } }])), id);
+  assert.deepEqual(snapshot?.photos?.[0].motionUrls, [clean, markedPath, markedQuery]);
+  assert.deepEqual(snapshot?.photos?.[0].motionCandidates?.map(candidate => [candidate.url, candidate.watermark, candidate.evidence]), [
+    [clean, "none", "platform_flag"], [markedPath, "present", "known_template"], [markedQuery, "present", "known_template"],
+  ]);
+  assert(!snapshot?.photos?.[0].motionUrls.some(url => url.includes("/play/?") || url.includes("ratio=1080p")));
+});
+
+test("Douyin quality: conflicting motion URIs keep the original image and decline mixed video candidates", () => {
+  const snapshot = extractDouyinWork(state(galleryWork([{ uri: "image-resource", url_list: [photoUrls[0]], video: {
+    duration: 2967, has_watermark: false,
+    play_addr_h264: { uri: "motion-A", width: 720, height: 960, url_list: [motionUrl] },
+    bit_rate: [{ bit_rate: 3000000, play_addr: { uri: "motion-B", width: 1440, height: 1920, url_list: ["https://media.example.com/motion-B.mp4"] } }],
+  } }])), id);
+  const photo = snapshot?.photos?.[0]; assert(photo);
+  assert.equal(photo.id, "uri:image-resource"); assert.deepEqual(photo.imageUrls, [photoUrls[0]]);
+  assert.equal(photo.motionExpected, true); assert.deepEqual(photo.motionUrls, []); assert.deepEqual(photo.motionCandidates, []);
+  assert.match(photo.reason ?? "", /动态视频资源身份.*不一致/);
+});
+
+test("Douyin protection: bitrate owner and address declarations both gate motion while preserving the static photo", () => {
+  for (const bitrate of [
+    { has_drm: true, play_addr: { uri: "motion-resource", url_list: [motionUrl], width: 1080, height: 1920 } },
+    { play_addr: { uri: "motion-resource", is_drm: true, url_list: [motionUrl], width: 1080, height: 1920 } },
+    { download_addr: { uri: "motion-resource", drm: { protected: true }, url_list: [motionUrl], width: 1080, height: 1920 } },
+  ]) {
+    const snapshot = extractDouyinWork(state(galleryWork([{ uri: "image-resource", url_list: [photoUrls[0]], video: { duration: 2967, bit_rate: [bitrate] } }])), id);
+    const photo = snapshot?.photos?.[0]; assert(photo);
+    assert.equal(photo.motionProtected, true); assert.equal(photo.motionExpected, true);
+    assert.deepEqual(photo.motionUrls, []); assert.deepEqual(photo.motionCandidates, []);
+    assert.deepEqual(photo.imageUrls, [photoUrls[0]]); assert.match(photo.reason ?? "", /保护|加密/);
+  }
+});
+
+test("Douyin protection: a clear alias cannot reintroduce the same protected URI or URL at another quality", () => {
+  const snapshot = extractDouyinWork(state(galleryWork([{ uri: "image-resource", url_list: [photoUrls[0]], video: {
+    has_watermark: false,
+    play_addr_h264: { uri: "motion-resource", url_list: [motionUrl], width: 720, height: 960 },
+    bit_rate: [{ has_drm: true, play_addr: { uri: "motion-resource", url_list: [motionUrl], width: 1440, height: 1920 } }],
+  } }])), id);
+  assert.equal(snapshot?.photos?.[0].motionProtected, true);
+  assert.deepEqual(snapshot?.photos?.[0].motionCandidates, []); assert.deepEqual(snapshot?.photos?.[0].motionUrls, []);
+});
+
+test("Douyin protection: known protected aliases propagate across photo positions while an independent URI stays usable", () => {
+  const alias = "https://media.example.com/protected-alias.mp4", independent = "https://media.example.com/independent-motion.mp4";
+  const snapshot = extractDouyinWork(state(galleryWork([
+    { uri: "image-one", url_list: [photoUrls[0]], video: { bit_rate: [{ has_drm: true, play_addr: { uri: "motion-protected", url_list: [motionUrl] } }] } },
+    { uri: "image-two", url_list: [photoUrls[1]], video: { play_addr: { uri: "motion-protected", url_list: [alias] } } },
+    { uri: "image-three", url_list: [photoUrls[0]], video: { play_addr: { url_list: [alias] } } },
+    { uri: "image-four", url_list: [photoUrls[1]], video: { play_addr: { uri: "motion-independent", url_list: [independent] } } },
+  ])), id);
+  assert.equal(snapshot?.photos?.length, 4);
+  assert.deepEqual(snapshot?.photos?.map(photo => photo.imageUrls), [[photoUrls[0]], [photoUrls[1]], [photoUrls[0]], [photoUrls[1]]]);
+  assert.deepEqual(snapshot?.photos?.map(photo => [!!photo.motionProtected, photo.motionUrls]), [[true, []], [true, []], [true, []], [false, [independent]]]);
+});
+
+test("Douyin protection: supplemental sources cannot clear a prior protected alias or reintroduce a newly protected one", async t => {
+  const current = await context(t), alias = `${motionUrl}&refresh=clear-alias`;
+  const protectedPhoto = { uri: "image-A", url_list: [photoUrls[0]], video: { duration: 2967, bit_rate: [{ has_drm: true, play_addr: { uri: "motion-protected", url_list: [motionUrl], width: 720, height: 960 } }] } };
+  const clearPhoto = { uri: "image-A", url_list: [photoUrls[0]], video: { duration: 2967, has_watermark: false, play_addr: { uri: "motion-protected", url_list: [alias], width: 720, height: 960 } } };
+  for (const [prior, supplemental] of [[protectedPhoto, clearPhoto], [{ ...clearPhoto, url_list: [] }, protectedPhoto]]) {
+    const first = galleryWork([prior, { uri: "image-B", url_list: [photoUrls[1]] }]), next = galleryWork([supplemental]);
+    const calls = slidesTransport(t, { status_code: 0, aweme_details: [next] }, state(first));
+    const record = await acquireDouyin(noteInput, current, {
+      captureBrowser: async (_input, _context, requests) => ({ finalUrl: noteInput.url, html: "", gated: false, responses: [{ url: requests[0].url, data: { status_code: 0, aweme_detail: galleryWork([clearPhoto]) } }] }),
+      probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }),
+    });
+    assert.equal(contentStatus({ ...record, processingMode: "original" }), "partial", JSON.stringify(record));
+    assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 2);
+    assert(record.assets.some(asset => asset.role === "video" && asset.status === "unavailable" && /保护|加密/.test(asset.reason ?? "")));
+    assert(!record.assets.some(asset => asset.role === "video" && asset.status === "saved"));
+    assert(!calls.some(call => call.url === motionUrl || call.url === alias));
+    assert.match(record.coverage?.photos ?? "", /2\/2 original photos/);
+  }
+});
+
+test("Douyin quality merge: conflicting video URIs cannot attach new motion or shrink the original image denominator", async t => {
+  const current = await context(t);
+  const prior = galleryWork([
+    { uri: "image-A", url_list: [photoUrls[0]], video: { duration: 2967, play_addr: { uri: "motion-A", url_list: [] } } },
+    { uri: "image-C", url_list: [photoUrls[1]] },
+  ]);
+  const replacement = galleryWork([{ uri: "image-A", url_list: [photoUrls[0]], video: { duration: 2967, has_watermark: false, play_addr: { uri: "motion-B", url_list: [motionUrl], width: 720, height: 960 } } }]);
+  const calls = slidesTransport(t, { status_code: 0, aweme_details: [replacement] }, state(prior));
+  const record = await acquireDouyin(noteInput, current, { probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }) });
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "partial", JSON.stringify(record));
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 2);
+  assert(!record.assets.some(asset => asset.role === "video" && asset.status === "saved"));
+  assert.match(record.coverage?.photos ?? "", /2\/2 original photos/); assert.match(record.warnings.join(" "), /动态视频资源身份.*不一致/);
+  assert(!calls.some(call => call.url === motionUrl));
+});
+
+test("Douyin quality merge: signed URL refresh preserves earlier known quality metadata and photo positions", async t => {
+  const current = await context(t), oldSigned = `${photoUrls[0]}?signature=OLD_FIXTURE`, newSigned = `${photoUrls[0]}?signature=NEW_FIXTURE`;
+  const prior = galleryWork([
+    { uri: "image-A", url_list: [oldSigned], width: 1, height: 1, has_watermark: false, live_photo_type: 1 },
+    { uri: "image-C", url_list: [photoUrls[1]] },
+  ]);
+  const replacement = galleryWork([{ uri: "image-A", url_list: [newSigned], video: { duration: 2967, has_watermark: false, play_addr: { uri: "motion-A", url_list: [motionUrl], width: 720, height: 960 } } }]);
+  slidesTransport(t, { status_code: 0, aweme_details: [replacement] }, state(prior));
+  const record = await acquireDouyin(noteInput, current, { probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }) });
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "completed", JSON.stringify(record));
+  const first = record.assets.find(asset => asset.id === "images/001" && asset.status === "saved"); assert(first);
+  assert.equal(first.sourceUrl, oldSigned); assert.equal(first.quality?.watermark, "none");
+  assert.equal(first.quality?.expectedWidth, 1); assert.equal(first.quality?.expectedHeight, 1);
+  assert.match(record.coverage?.photos ?? "", /2\/2 original photos/);
+});
+
 test("Douyin: original mode completes without unsupported native comments or subtitles",async t=>{
   const current=await context(t);transport(t);const record=await acquireDouyin(input,current,{probeMedia:probe});
   assert.equal(contentStatus({...record,processingMode:"original"}),"completed");

@@ -168,3 +168,32 @@ test("Xiaohongshu browser enrichment cannot reintroduce a publicly declared prot
  const result = await acquireContent({ platform: source.platform, nativeId: source.nativeId, canonicalUrl: source.canonicalUrl, url: source.sourceUrl, processing: "original" }, ctx, { photoMedia: dependencies(calls) });
  assert.deepEqual(calls, ["https://example.com/photo.png"]); assert.equal(result.assets.find(asset => asset.role === "video")?.status, "unavailable"); assert.equal(contentStatus(result), "partial");
 });
+
+test("a whole protected Xiaohongshu video blocks supplied quality candidates and legacy video aliases", async t => {
+ t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+ const ctx = await context(t), source = base(), calls: string[] = [], url = "https://example.com/protected.mp4";
+ const result = await acquireContent({ platform: source.platform, nativeId: source.nativeId, canonicalUrl: source.canonicalUrl, url: source.sourceUrl, processing: "original" }, ctx, { captureXiaohongshu: async () => ({ finalUrl: source.canonicalUrl, title: source.title, body: source.markdown, images: [], videos: [url], videoExpected: true, videoProtected: true, videoCandidates: [{ url, source: "provided", rendition: "playback", watermark: "unknown" }] }), photoMedia: dependencies(calls) } as Parameters<typeof acquireContent>[2]);
+ assert.deepEqual(calls, []); assert.equal(result.assets.find(asset => asset.role === "video")?.status, "unavailable"); assert.match(result.assets.find(asset => asset.role === "video")!.reason!, /受保护或加密/); assert.equal(contentStatus(result), "partial");
+});
+
+test("public whole-video protection survives an unprotected same-note Edge fallback with a different URL", async t => {
+ t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+ const ctx = await context(t), source = base(), calls: string[] = [];
+ const html = (protectedStream: boolean, url: string) => `<script>window.__INITIAL_STATE__=${JSON.stringify({ note: { noteDetailMap: { [source.nativeId!]: { note: { noteId: source.nativeId, desc: source.markdown, type: "video", video: { has_drm: protectedStream, media: { stream: { h264: [{ masterUrl: url, duration: 2000 }] } } } } } } } })};</script>`;
+ t.mock.method(globalThis, "fetch", async () => new Response(html(true, "https://example.com/protected-state.mp4")));
+ const page = { goto: async () => {}, waitForFunction: async () => {}, url: () => source.canonicalUrl, content: async () => html(false, "https://example.com/edge-alias.mp4"), locator: () => ({ innerText: async () => source.markdown }) };
+ t.mock.method(chromium, "launchPersistentContext", async () => ({ pages: () => [page], route: async () => {}, close: async () => {} }) as never);
+ const result = await acquireContent({ platform: source.platform, nativeId: source.nativeId, canonicalUrl: source.canonicalUrl, url: source.sourceUrl, processing: "original" }, ctx, { photoMedia: dependencies(calls), probeMedia: dependencies().probeMedia });
+ assert.deepEqual(calls, []); assert.equal(result.assets.find(asset => asset.role === "video")?.status, "unavailable"); assert.equal(contentStatus(result), "partial");
+});
+
+test("publicly protected photo motion cannot be reassigned to another photo through same-note Edge enrichment", async t => {
+ t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+ const ctx = await context(t), source = base(), calls: string[] = [], protectedUrl = "https://example.com/protected-motion.mp4";
+ const html = (browser: boolean) => `<script>window.__INITIAL_STATE__=${JSON.stringify({ note: { noteDetailMap: { [source.nativeId!]: { note: { noteId: source.nativeId, desc: source.markdown, type: "normal", imageList: [{ fileId: "first-photo", urlDefault: "https://example.com/first.png", livePhoto: true, ...(browser ? {} : { stream: { has_drm: true, h264: [{ masterUrl: protectedUrl, duration: 2000 }] } }) }, { fileId: "second-photo", urlDefault: "https://example.com/second.png", livePhoto: true, ...(browser ? { stream: { h264: [{ masterUrl: protectedUrl, duration: 2000 }] } } : {}) }] } } } } })};</script>`;
+ t.mock.method(globalThis, "fetch", async () => new Response(html(false)));
+ const page = { goto: async () => {}, waitForFunction: async () => {}, url: () => source.canonicalUrl, content: async () => html(true), locator: () => ({ innerText: async () => source.markdown }) };
+ t.mock.method(chromium, "launchPersistentContext", async () => ({ pages: () => [page], route: async () => {}, close: async () => {} }) as never);
+ const result = await acquireContent({ platform: source.platform, nativeId: source.nativeId, canonicalUrl: source.canonicalUrl, url: source.sourceUrl, processing: "original" }, ctx, { photoMedia: dependencies(calls) });
+ assert.deepEqual(calls, ["https://example.com/first.png", "https://example.com/second.png"]); assert.equal(result.assets.filter(asset => asset.role === "video" && asset.status === "saved").length, 0); assert.equal(contentStatus(result), "partial");
+});

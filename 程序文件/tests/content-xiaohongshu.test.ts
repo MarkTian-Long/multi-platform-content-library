@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { extractXiaohongshuSnapshot } from "../src/content-xiaohongshu.js";
+import * as xiaohongshu from "../src/content-xiaohongshu.js";
 
 test("a declared image note is not misclassified by empty video metadata", () => {
   const url="https://www.xiaohongshu.com/explore/123456789012345678901234";
@@ -152,9 +153,9 @@ test("Xiaohongshu keeps a declared Live Photo unavailable when its stream is mis
   assert.match(snapshot.photos?.[0].reason ?? "", /实况|动态/);
 });
 
-test("Xiaohongshu keeps supplied image and h264 fallback candidates without guessing CDN URLs", () => {
+test("Xiaohongshu keeps supplied image and h264 fallbacks for an unrecognized image resource", () => {
   const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [{
-    fileId: "notes_pre_post/original-file-id", livePhoto: true,
+    fileId: "notes_pre_post/short", livePhoto: true,
     urlDefault: "https://example.com/original.avif?format=avif&signature=placeholder",
     urlPre: "https://example.com/preview.jpg",
     infoList: [{ imageScene: "WB_DFT", url: "https://example.com/default.webp" }],
@@ -162,7 +163,7 @@ test("Xiaohongshu keeps supplied image and h264 fallback candidates without gues
   }] }), noteUrl);
   assert.deepEqual(snapshot.photos?.[0].imageUrls, ["https://example.com/original.avif?format=avif&signature=placeholder", "https://example.com/default.webp", "https://example.com/preview.jpg"]);
   assert.deepEqual(snapshot.photos?.[0].motionUrls, ["https://example.com/master.mp4?signature=placeholder", "https://example.com/backup.mp4"]);
-  assert.equal(snapshot.photos?.[0].id, "notes_pre_post/original-file-id");
+  assert.equal(snapshot.photos?.[0].id, "notes_pre_post/short");
   assert.equal(snapshot.photos?.[0].durationSeconds, 2.5);
 });
 
@@ -469,4 +470,289 @@ test("Xiaohongshu does not let foreign or contradictory protected identities poi
   assert.equal(snapshot.photos?.[0].durationSeconds, 3);
   assert.deepEqual(snapshot.photos?.slice(1).map(photo => photo.motionUrls), [[], []]);
   assert.deepEqual(snapshot.images, ["https://example.com/ordinary.jpg"]);
+});
+
+const originalResource = "notes_pre_post/image_resource_0123456789";
+const otherResource = "notes_pre_post/foreign_resource_0123456789";
+const originalPreview = `https://sns-webpic-qc.xhscdn.com/2026101412/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/${originalResource}!h5_1080jpg?signature=placeholder&expires=42`;
+const originalObjectUrls = [`https://sns-img-bd.xhscdn.com/${originalResource}`, `https://ci.xiaohongshu.com/${originalResource}`];
+
+test("Xiaohongshu exposes narrow original-object image candidates and preserves its supplied fallback URL", () => {
+  const candidates = xiaohongshu.xiaohongshuOriginalImageCandidates([originalPreview], originalResource);
+  assert.deepEqual(candidates.map(candidate => candidate.url), [...originalObjectUrls, originalPreview]);
+  assert.deepEqual(candidates.slice(0, 2).map(candidate => [candidate.source, candidate.rendition, candidate.watermark, candidate.evidence]), [
+    ["platform_object", "original", "unknown", "known_template"], ["platform_object", "original", "unknown", "known_template"]
+  ]);
+  assert.equal(candidates.at(-1)?.source, "provided");
+  assert.equal(candidates.at(-1)?.watermark, "unknown");
+});
+
+test("Xiaohongshu maps only an explicit notes_pre_post resource from a platform image URL", () => {
+  assert.deepEqual(xiaohongshu.xiaohongshuOriginalImageCandidates([originalPreview]).slice(0, 2).map(candidate => candidate.url), originalObjectUrls);
+  assert.deepEqual(xiaohongshu.xiaohongshuOriginalImageCandidates([], originalResource).map(candidate => candidate.url), originalObjectUrls);
+  for (const url of [
+    `https://example.com/${originalResource}!h5_1080jpg`, `https://xhscdn.com.example.com/${originalResource}!h5_1080jpg`,
+    "https://sns-webpic-qc.xhscdn.com/spectrum/image_resource_0123456789!h5_1080jpg",
+    "https://sns-webpic-qc.xhscdn.com/notes_pre_post/short!h5_1080jpg",
+    "https://sns-webpic-qc.xhscdn.com/notes_pre_post%2Fimage_resource_0123456789!h5_1080jpg"
+  ]) assert.equal(xiaohongshu.xiaohongshuOriginalImageCandidates([url]).some(candidate => candidate.source === "platform_object"), false);
+});
+
+test("Xiaohongshu refuses original image mappings for invalid or conflicting resource namespaces", () => {
+  for (const fileId of ["../notes_pre_post/image_resource_0123456789", "notes_pre_post/short", "spectrum/image_resource_0123456789", "notes_pre_post/image_resource_0123456789?signature=placeholder"]) {
+    assert.equal(xiaohongshu.xiaohongshuOriginalImageCandidates([originalPreview], fileId).some(candidate => candidate.source === "platform_object"), false);
+  }
+  assert.deepEqual(xiaohongshu.xiaohongshuOriginalImageCandidates([originalPreview], otherResource), []);
+  assert.deepEqual(xiaohongshu.xiaohongshuOriginalImageCandidates([originalPreview, originalPreview.replace(originalResource, otherResource)]), []);
+  assert.deepEqual(xiaohongshu.xiaohongshuOriginalImageCandidates(["file:///private.jpg", "https://user:password@sns-webpic-qc.xhscdn.com/notes_pre_post/image_resource_0123456789"]), []);
+});
+
+test("Xiaohongshu ranks an original image object first while retaining declared dimensions and the signed preview", () => {
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [{
+    fileId: originalResource, imageId: "separate-gallery-id", width: 3024, height: 4032, urlDefault: originalPreview,
+    livePhoto: true, stream: { h264: [{ masterUrl: "https://example.com/web-live.mp4", streamType: 19, streamDesc: "WEB_LIVEPHOTO_19", width: 1080, height: 1440, duration: 3000 }] }
+  }] }), noteUrl);
+  const photo = snapshot.photos?.[0];
+  assert.deepEqual(photo?.imageUrls, [...originalObjectUrls, originalPreview]);
+  assert.deepEqual(snapshot.images, [originalObjectUrls[0]]);
+  assert.equal(photo?.width, 3024);
+  assert.equal(photo?.height, 4032);
+  assert.deepEqual(photo?.imageCandidates?.slice(0, 2).map(candidate => [candidate.width, candidate.height]), [[3024, 4032], [3024, 4032]]);
+  assert.equal(photo?.motionCandidates?.[0].watermark, "present");
+  assert.equal(photo?.motionCandidates?.[0].evidence, "known_stream_type");
+  assert.equal(photo?.motionCandidates?.[0].durationSeconds, 3);
+});
+
+test("Xiaohongshu does not reintroduce an image with contradictory resource identity through rendered media", () => {
+  const html = `<div id="noteContainer"><div class="note-media"><img src="${originalPreview}"></div></div>`
+    + stateHtml({ noteId, type: "normal", imageList: [{ fileId: otherResource, urlDefault: originalPreview }] });
+  const snapshot = extractXiaohongshuSnapshot(html, noteUrl);
+  assert.deepEqual(snapshot.photos?.[0].imageUrls, []);
+  assert.deepEqual(snapshot.images, []);
+  assert.match(snapshot.photos?.[0].reason ?? "", /身份|资源/);
+});
+
+test("Xiaohongshu prefers unknown-watermark H265 over a larger known-logo H264 and ranks remaining streams by pixels and bitrate", () => {
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("quality", {
+    stream: { h264: [
+      { masterUrl: "https://example.com/logo.mp4", streamType: 19, width: 1080, height: 1440, videoBitrate: 4000000, duration: 3000 },
+      { masterUrl: "https://example.com/small.mp4", width: 240, height: 320, videoBitrate: 500000, duration: 3000 }
+    ], h265: [
+      { masterUrl: "https://example.com/hevc-low.mp4", width: 720, height: 960, videoBitrate: 1000000, duration: 3000 },
+      { masterUrl: "https://example.com/hevc-high.mp4", width: 720, height: 960, videoBitrate: 2000000, duration: 3000 }
+    ] }
+  })] }), noteUrl);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, ["https://example.com/hevc-high.mp4", "https://example.com/hevc-low.mp4", "https://example.com/small.mp4", "https://example.com/logo.mp4"]);
+  assert.equal(snapshot.photos?.[0].motionCandidates?.[0].watermark, "unknown");
+  assert.equal(snapshot.photos?.[0].motionCandidates?.[0].bitrate, 2000000);
+  assert.equal(snapshot.photos?.[0].motionCandidates?.at(-1)?.watermark, "present");
+  assert.deepEqual(snapshot.videos, []);
+});
+
+for (const flags of [{ streamType: 19 }, { streamType: 259 }, { streamType: 309 }, { streamDesc: "WEB_LIVEPHOTO_19" }]) {
+  test(`Xiaohongshu marks a known platform-watermark stream ${JSON.stringify(flags)} without claiming others clean`, () => {
+    const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("watermark", {
+      stream: { h264: [{ ...flags, masterUrl: "https://example.com/watermarked.mp4" }], h265: [{ masterUrl: "https://example.com/unknown-hevc.mp4", streamType: 258 }] }
+    })] }), noteUrl);
+    assert.deepEqual(snapshot.photos?.[0].motionCandidates?.map(candidate => candidate.watermark), ["unknown", "present"]);
+    assert.equal(snapshot.photos?.[0].motionCandidates?.at(-1)?.evidence, "known_stream_type");
+  });
+}
+
+test("Xiaohongshu reads an actual nested Live Photo component and supplied original Key without guessing from stream IDs", () => {
+  const key = "spectrum/actual_live_origin_resource.mp4";
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("nested-live", {
+    stream: undefined,
+    livePhoto: { noteId, consumer: { originVideoKey: key }, media: { stream: { h265: [{ masterUrl: "https://example.com/nested-hevc.mp4", width: 1080, height: 1440, duration: 3000 }] } } }
+  }), liveImage("no-origin", { stream: { h264: [{ masterUrl: "https://example.com/stream/1/10/19/opaque_19.mp4", videoId: "not-an-origin-key" }] } })] }), noteUrl);
+  const photo = snapshot.photos?.[0];
+  assert.deepEqual(photo?.motionUrls, [`https://sns-video-bd.xhscdn.com/${key}`, "https://example.com/nested-hevc.mp4"]);
+  assert.equal(photo?.motionCandidates?.[0].source, "platform_object");
+  assert.equal(photo?.motionCandidates?.[0].rendition, "original");
+  assert.equal(photo?.motionCandidates?.[0].watermark, "unknown");
+  assert.equal(photo?.motionExpected, true);
+  assert.equal(snapshot.photos?.[1].motionCandidates?.some(candidate => candidate.rendition === "original"), false);
+  assert.deepEqual(snapshot.videos, []);
+});
+
+test("Xiaohongshu preserves a supplied original HTTP URL and refuses malformed Keys or foreign consumers", () => {
+  const supplied = "https://example.com/original.mp4?signature=placeholder&expires=42";
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [
+    liveImage("http-original", { consumer: { originVideoKey: supplied } }),
+    liveImage("foreign-origin", { consumer: { noteId: otherId, originVideoKey: "spectrum/foreign.mp4" } }),
+    ...["../private.mp4", "spectrum/../private.mp4", "blob:https://example.com/key", "https://user:password@example.com/private.mp4", "spectrum/key.mp4?signature=placeholder"].map((originVideoKey, index) => liveImage(`invalid-origin-${index}`, { consumer: { originVideoKey } }))
+  ] }), noteUrl);
+  assert.equal(snapshot.photos?.[0].motionCandidates?.[0].url, supplied);
+  assert.equal(snapshot.photos?.[0].motionCandidates?.[0].source, "provided");
+  assert.equal(snapshot.photos?.[0].motionCandidates?.[0].rendition, "original");
+  for (const photo of snapshot.photos?.slice(1) ?? []) assert.equal(photo.motionCandidates?.some(candidate => candidate.rendition === "original"), false);
+});
+
+test("Xiaohongshu applies cross-photo protection to H265 and supplied original addresses before ranking", () => {
+  const key = "spectrum/shared_origin_resource.mp4", shared = `https://sns-video-bd.xhscdn.com/${key}`;
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [
+    liveImage("ordinary-origin", { stream: undefined, consumer: { originVideoKey: key } }),
+    liveImage("ordinary-hevc", { stream: { h265: [{ masterUrl: shared, duration: 3000 }] } }),
+    liveImage("protected-hevc", { stream: { h265: [{ hasDrm: true, masterUrl: shared }] } }),
+    liveImage("different-hevc", { stream: { h265: [{ masterUrl: "https://example.com/ordinary-hevc.mp4", duration: 2500 }] } })
+  ] }), noteUrl);
+  assert.deepEqual(snapshot.photos?.slice(0, 3).map(photo => photo.motionUrls), [[], [], []]);
+  assert.deepEqual(snapshot.photos?.slice(0, 3).map(photo => photo.motionProtected), [true, true, true]);
+  assert.deepEqual(snapshot.photos?.slice(0, 3).map(photo => photo.motionExpected), [true, true, true]);
+  assert.deepEqual(snapshot.photos?.[3].motionUrls, ["https://example.com/ordinary-hevc.mp4"]);
+  assert.equal(snapshot.photos?.[3].durationSeconds, 2.5);
+});
+
+test("Xiaohongshu treats a whole protected photo stream as protected even when it supplies an original Key", () => {
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("whole-stream", {
+    stream: { encrypted: true, h265: [{ masterUrl: "https://example.com/protected-hevc.mp4" }] },
+    consumer: { originVideoKey: "spectrum/protected_origin_resource.mp4" }
+  })] }), noteUrl);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, []);
+  assert.deepEqual(snapshot.photos?.[0].motionCandidates, []);
+  assert.equal(snapshot.photos?.[0].motionProtected, true);
+  assert.deepEqual(snapshot.photos?.[0].imageUrls, ["https://example.com/whole-stream.jpg"]);
+});
+
+test("Xiaohongshu exposes ranked normal-note video candidates and keeps photo motion separate", () => {
+  const key = "spectrum/actual_note_origin_resource.mp4";
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "video", video: {
+    consumer: { originVideoKey: key }, media: { stream: { h264: [{ masterUrl: "https://example.com/download.mp4", streamType: 259, width: 1920, height: 1080 }] } }
+  }, imageList: [liveImage("photo-motion")] }), noteUrl);
+  assert.equal(snapshot.videoCandidates?.[0].url, `https://sns-video-bd.xhscdn.com/${key}`);
+  assert.equal(snapshot.videoCandidates?.[0].rendition, "original");
+  assert.equal(snapshot.videoCandidates?.[0].watermark, "unknown");
+  assert.equal(snapshot.videoCandidates?.at(-1)?.watermark, "present");
+  assert.deepEqual(snapshot.videos, [`https://sns-video-bd.xhscdn.com/${key}`]);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, ["https://example.com/photo-motion.mp4"]);
+});
+
+test("Xiaohongshu considers later H265 primary quality candidates even with many earlier H264 backups", () => {
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("bounded-quality", {
+    stream: { h264: Array.from({ length: 32 }, (_, index) => ({ masterUrl: `https://example.com/h264-${index}.mp4`, width: 240, height: 320, backupUrls: Array.from({ length: 16 }, (_, backup) => `https://example.com/h264-${index}-backup-${backup}.mp4`) })),
+      h265: [{ masterUrl: "https://example.com/best-hevc.mp4", width: 1080, height: 1440, duration: 3000 }] }
+  })] }), noteUrl);
+  assert.equal(snapshot.photos?.[0].motionUrls[0], "https://example.com/best-hevc.mp4");
+});
+
+test("Xiaohongshu rejects an explicitly conflicting image resource even in a supplied fallback host", () => {
+  const foreign = `https://example.com/${otherResource}!h5_1080jpg`;
+  assert.deepEqual(xiaohongshu.xiaohongshuOriginalImageCandidates([foreign], originalResource), []);
+});
+
+test("Xiaohongshu keeps a contradictory image resource out of photo motion and the global protection set", () => {
+  const shared = "https://example.com/ordinary-shared.mp4";
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [
+    liveImage("ordinary", { stream: { h265: [{ masterUrl: shared, duration: 3000 }] } }),
+    { fileId: otherResource, urlDefault: originalPreview, livePhoto: true, stream: { h265: [{ encrypted: true, masterUrl: shared }] } }
+  ] }), noteUrl);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, [shared]);
+  assert.equal(snapshot.photos?.[0].motionProtected, undefined);
+  assert.deepEqual(snapshot.photos?.[1].motionUrls, []);
+  assert.deepEqual(snapshot.photos?.[1].imageUrls, []);
+  assert.equal(snapshot.photos?.[1].motionExpected, true);
+  assert.match(snapshot.photos?.[1].reason ?? "", /身份/);
+});
+
+test("Xiaohongshu does not let a foreign nested Live Photo poison valid H265 or supplied origin candidates", () => {
+  const shared = "https://example.com/ordinary-shared.mp4";
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("ordinary-nested", {
+    imageId: "target-gallery-id", stream: { h265: [{ masterUrl: shared, duration: 3000 }] },
+    livePhoto: { noteId: otherId, encrypted: true, consumer: { originVideoKey: shared }, media: { stream: { h265: [{ masterUrl: shared }] } } }
+  })] }), noteUrl);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, [shared]);
+  assert.equal(snapshot.photos?.[0].motionProtected, undefined);
+  assert.equal(snapshot.photos?.[0].motionCandidates?.[0].rendition, "playback");
+});
+
+test("Xiaohongshu blocks a protected consumer original URI repeated by ordinary codec aliases", () => {
+  const shared = "https://example.com/shared-origin.mp4";
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("protected-origin", {
+    consumer: { encrypted: true, originVideoKey: shared },
+    stream: { h264: [{ masterUrl: shared }], h265: [{ masterUrl: shared }] }
+  })] }), noteUrl);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, []);
+  assert.equal(snapshot.photos?.[0].motionProtected, true);
+});
+
+test("Xiaohongshu keeps the declared image resource identity stable across object and refreshed preview candidates", () => {
+  const first = xiaohongshu.xiaohongshuOriginalImageCandidates([originalPreview], originalResource);
+  const refreshed = originalPreview.replace("2026101412", "2026101413").replace("signature=placeholder&expires=42", "signature=refreshed&expires=43");
+  const second = xiaohongshu.xiaohongshuOriginalImageCandidates([refreshed]);
+  assert.equal(typeof first[0].resourceId, "string");
+  assert.notEqual(first[0].resourceId, originalResource);
+  assert.equal(new Set([...first, ...second].map(candidate => candidate.resourceId)).size, 1);
+  assert.equal(second.at(-1)?.url, refreshed);
+});
+
+test("Xiaohongshu binds resource metadata only to actual original Keys, preserving a same-URI codec alias", () => {
+  const key = "spectrum/actual_origin_resource.mp4", original = `https://sns-video-bd.xhscdn.com/${key}`;
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [
+    liveImage("actual-key", { consumer: { originVideoKey: key }, stream: { h265: [{ masterUrl: original, width: 1080, height: 1440, duration: 3000 }] } }),
+    liveImage("stream-id-only", { stream: { h264: [{ masterUrl: "https://example.com/opaque_19.mp4", videoId: key }] } })
+  ] }), noteUrl);
+  const candidate = snapshot.photos?.[0].motionCandidates?.[0];
+  assert.equal(candidate?.url, original);
+  assert.equal(candidate?.rendition, "original");
+  assert.equal(typeof candidate?.resourceId, "string");
+  assert.notEqual(candidate?.resourceId, key);
+  assert.equal(snapshot.photos?.[1].motionCandidates?.[0].resourceId, undefined);
+});
+
+test("Xiaohongshu refuses all top-level DOM and state fallbacks when the note video or its stream is wholly protected", () => {
+  const protectedUrl = "https://example.com/protected-note.mp4";
+  for (const video of [
+    { has_drm: true, media: { stream: { h264: [{ masterUrl: protectedUrl }] } } },
+    { media: { is_drm: true, stream: { h264: [{ masterUrl: protectedUrl }] } } },
+    { media: { stream: { encrypted: true, h264: [{ masterUrl: protectedUrl }] } } }
+  ]) {
+    const html = '<div id="noteContainer"><video src="https://example.com/rendered-alternate.mp4"></video></div>'
+      + stateHtml({ noteId, type: "video", video, imageList: [liveImage("independent-photo")] });
+    const snapshot = extractXiaohongshuSnapshot(html, noteUrl);
+    assert.deepEqual(snapshot.videos, []);
+    assert.deepEqual(snapshot.videoCandidates ?? [], []);
+    assert.equal(snapshot.videoProtected, true);
+    assert.equal(snapshot.videoExpected, true);
+    assert.deepEqual(snapshot.photos?.[0].motionUrls, ["https://example.com/independent-photo.mp4"]);
+    assert.equal(snapshot.photos?.[0].motionProtected, undefined);
+    assert.deepEqual(snapshot.images, ["https://example.com/independent-photo.jpg"]);
+  }
+});
+
+test("Xiaohongshu retains an ordinary top-level video candidate when only another stream row is protected", () => {
+  const ordinary = "https://example.com/ordinary-note.mp4";
+  const html = `<div id="noteContainer"><video src="${ordinary}"></video></div>`
+    + stateHtml({ noteId, type: "video", video: { media: { stream: { h264: [
+      { encrypted: true, masterUrl: "https://example.com/protected-note.mp4" }, { encrypted: false, masterUrl: ordinary }
+    ] } } } });
+  const snapshot = extractXiaohongshuSnapshot(html, noteUrl);
+  assert.deepEqual(snapshot.videos, [ordinary]);
+  assert.deepEqual(snapshot.videoCandidates?.map(candidate => candidate.url), [ordinary]);
+  assert.equal(snapshot.videoProtected, undefined);
+});
+
+test("Xiaohongshu does not mark an independent gallery as a protected top-level note video", () => {
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", video: { has_drm: true }, imageList: [liveImage("gallery-photo")] }), noteUrl);
+  assert.deepEqual(snapshot.videos, []);
+  assert.equal(snapshot.videoProtected, undefined);
+  assert.equal(snapshot.videoExpected, undefined);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, ["https://example.com/gallery-photo.mp4"]);
+  assert.equal(snapshot.photos?.[0].motionProtected, undefined);
+});
+
+test("Xiaohongshu exposes only identity-validated protected video URIs for temporary cross-snapshot propagation", () => {
+  const shared = "https://example.com/protected-shared.mp4", backup = "https://example.com/protected-backup.mp4";
+  const snapshot = extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [
+    liveImage("protected-photo-a", { stream: { h264: [{ encrypted: true, masterUrl: shared, backupUrls: [backup] }] } }),
+    liveImage("missing-photo-b", { stream: undefined }),
+    liveImage("foreign-note", { noteId: otherId, stream: { h265: [{ encrypted: true, masterUrl: "https://example.com/foreign-note.mp4" }] } }),
+    liveImage("contradictory-photo", { file_id: "different-upload", stream: { h265: [{ encrypted: true, masterUrl: "https://example.com/contradictory-photo.mp4" }] } }),
+    liveImage("foreign-stream", { imageId: "target-gallery-id", stream: { h265: [{ imageId: "other-gallery-id", encrypted: true, masterUrl: "https://example.com/foreign-stream.mp4" }] } })
+  ] }, { [otherId]: { note: { noteId: otherId, imageList: [liveImage("recommendation", { stream: { h264: [{ encrypted: true, masterUrl: "https://example.com/recommended.mp4" }] } })] } } }), noteUrl);
+  assert.deepEqual(snapshot.protectedVideoUrls, [shared, backup]);
+  assert.deepEqual(snapshot.photos?.[0].motionUrls, []);
+  assert.equal(snapshot.photos?.[0].motionProtected, true);
+  assert.deepEqual(snapshot.photos?.[1].motionUrls, []);
+  assert.equal(snapshot.photos?.[1].motionProtected, undefined);
+  assert.equal(extractXiaohongshuSnapshot(stateHtml({ noteId, type: "normal", imageList: [liveImage("ordinary")] }), noteUrl).protectedVideoUrls, undefined);
 });

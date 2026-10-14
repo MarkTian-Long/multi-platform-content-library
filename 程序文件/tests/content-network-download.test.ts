@@ -85,6 +85,12 @@ test("download: QuickTime MIME preserves MOV even when the public URL has no fil
   await saved(root, asset); assert.equal(asset.path, "video/live-photo.mov");
 });
 
+for (const format of ["heic", "heif"]) test(`download: ${format.toUpperCase()} MIME preserves the original container and bytes without conversion`, async t => {
+  const root = await directory(t); transport(t, [{ bytes: full, headers: { "content-type": `image/${format}`, "content-length": "8" } }]);
+  const asset = await savePublicAsset("https://example.com/original-object", root, "image/original", "image");
+  await saved(root, asset); assert.equal(asset.path, `image/original.${format}`); assert.equal(asset.mime, `image/${format}`);
+});
+
 test("download: a two-frame GIF keeps both image descriptors and exactly the original bytes", async t => {
   const root = await directory(t);
   const gif = Buffer.from("47494638396101000100800000000000ffffff21f904000a0000002c000000000100010000020244010021f904000a0000002c00000000010001000002024c01003b", "hex");

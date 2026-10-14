@@ -119,7 +119,7 @@ export function fetchedPublicRedirects(response: Response): readonly string[] { 
 
 function assetExtension(contentType: string, fallback = "bin"): string {
   const type = contentType.split(";", 1)[0].trim().toLowerCase();
-  return ({ "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm", "text/vtt": "vtt", "application/pdf": "pdf" } as Record<string, string>)[type] ?? fallback;
+  return ({ "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif", "image/heic": "heic", "image/heif": "heif", "image/bmp": "bmp", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm", "text/vtt": "vtt", "application/pdf": "pdf" } as Record<string, string>)[type] ?? fallback;
 }
 
 const DOWNLOAD_ATTEMPTS = 3;

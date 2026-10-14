@@ -20,6 +20,15 @@ export interface ContentAsset {
   language?: string; partId?: string; startMs?: number; endMs?: number;
   derivation?: {sourceId:string;sourceSha256:string;processingFingerprint?:string};
   integrityFailed?: boolean;
+  quality?: {
+    width?: number; height?: number; expectedWidth?: number; expectedHeight?: number;
+    source: "provided" | "platform_object";
+    rendition: "original" | "playback" | "download" | "preview" | "unknown";
+    watermark: "none" | "present" | "unknown";
+    evidence?: "platform_flag" | "known_stream_type" | "known_template";
+    resolution: "matches_source" | "smaller_than_source" | "unconfirmed";
+    resourceId: string;
+  };
 }
 export interface ContentPart { id: string; title: string; status: "saved" | "partial" | "failed" | "unavailable"; durationSeconds?: number; reason?: string; }
 export interface CapturedContent {
