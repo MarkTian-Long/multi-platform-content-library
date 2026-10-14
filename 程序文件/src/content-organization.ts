@@ -24,7 +24,11 @@ export async function withOrganizationLock<T>(root:string,name:string,operation:
   const file=await writableFile(root,`.organization/${name}.lock`),token=crypto.randomUUID(),deadline=Date.now()+8000;
   for(;;){signal?.throwIfAborted();try{const handle=await fs.open(file,'wx');try{await handle.writeFile(JSON.stringify({pid:process.pid,token}));}finally{await handle.close();}break;}catch(e){
     if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;
-    const safe=await containedFile(root,`.organization/${name}.lock`),stat=await fs.stat(safe);
+    let safe:string,stat:Awaited<ReturnType<typeof fs.stat>>;
+    try{safe=await containedFile(root,`.organization/${name}.lock`);stat=await fs.stat(safe);}catch(error){
+      if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;
+      if(Date.now()>=deadline)throw new Error('组织管理正忙，请稍后重试');continue;
+    }
     if(Date.now()-stat.mtimeMs>2000){let owner:{pid?:number}={};try{owner=JSON.parse(await fs.readFile(safe,'utf8'));}catch{}
       if(!owner.pid||!alive(owner.pid)){await fs.unlink(safe).catch(()=>{});continue;}}
     if(Date.now()>=deadline)throw new Error('组织管理正忙，请稍后重试');await new Promise(r=>setTimeout(r,25));

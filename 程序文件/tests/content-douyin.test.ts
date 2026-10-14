@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { promises as dns } from "node:dns";
-import { acquireDouyin as acquireDouyinModule, type DouyinDeps } from "../src/content-douyin.js";
+import { acquireDouyin as acquireDouyinModule, extractDouyinWork, type DouyinDeps } from "../src/content-douyin.js";
 import { runContentTool } from "../src/content-tools.js";
 import type { ContentInput, ContentContext } from "../src/content-types.js";
 import {contentStatus} from "../src/content-library.js";
@@ -12,6 +12,8 @@ import {contentStatus} from "../src/content-library.js";
 const id = "6961737553342991651";
 const input = { platform: "douyin", nativeId: id, url: `https://www.douyin.com/video/${id}`, canonicalUrl: `https://www.douyin.com/video/${id}` } as ContentInput;
 const mediaUrl = "https://media.example.com/clip.mp4?signature=fixture-only";
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==", "base64");
+const photoMotionBytes = Buffer.from([0, 0, 0, 16, ...Buffer.from("ftypisom"), 0, 0, 0, 0]);
 const work = { aweme_id: id, desc: "原始作品说明 #话题", author: { nickname: "示例作者" }, create_time: 1620905839, video: { duration: 19000, play_addr: { url_list: [mediaUrl] } } };
 const page = (value: unknown) => `<script id="RENDER_DATA" type="application/json">${encodeURIComponent(JSON.stringify(value))}</script>`;
 const state = (value: unknown) => page({ aweme: { detail: value } });
@@ -36,11 +38,292 @@ function transport(t: TestContext, html = state(work)) {
   t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   t.mock.method(globalThis, "fetch", async (url: URL, options: RequestInit) => {
     calls.push({ url: String(url), headers: new Headers(options.headers) });
-    return String(url).startsWith("https://www.douyin.com/") ? new Response(html, { headers: { "content-type": "text/html" } }) : new Response("abcdefgh", { headers: { "content-type": "video/mp4", "content-length": "8" } });
+    if (String(url).startsWith("https://www.douyin.com/")) return new Response(html, { headers: { "content-type": "text/html" } });
+    if (/\.(webp|png|jpe?g)(?:\?|$)/.test(String(url))) return new Response(png, { headers: { "content-type": "image/png", "content-length": String(png.length) } });
+    if (String(url).includes("photo-motion.mp4")) return new Response(photoMotionBytes, { headers: { "content-type": "video/mp4", "content-length": String(photoMotionBytes.length) } });
+    return new Response("abcdefgh", { headers: { "content-type": "video/mp4", "content-length": "8" } });
   });
   return calls;
 }
 const probe: DouyinDeps["probeMedia"] = async () => ({ video: true, audio: true, durationSeconds: 19 });
+
+const noteInput = { ...input, url: `https://www.douyin.com/note/${id}`, canonicalUrl: `https://www.douyin.com/note/${id}` };
+const photoUrls = ["https://media.example.com/photo-one.webp", "https://media.example.com/photo-two.webp"];
+const motionUrl = "https://media.example.com/photo-motion.mp4?signature=fixture-only";
+const galleryWork = (images: unknown[]) => ({ ...work, aweme_type: 68, video: undefined, images });
+
+test("Douyin photos: precise images preserve source order, original URLs and one stable ID per photo", () => {
+  const snapshot = extractDouyinWork(state(galleryWork([
+    { url_list: [photoUrls[0], "https://media.example.com/photo-one-backup.webp"] },
+    null,
+    { url_list: [photoUrls[1]], video: { duration: 2967, play_addr_h264: { url_list: [motionUrl] }, play_addr: { url_list: ["https://media.example.com/other-quality.mp4"] } } },
+  ])), id);
+  assert(snapshot);
+  assert.equal(snapshot.images, true);
+  assert.equal(snapshot.photos?.length, 3);
+  assert.deepEqual(snapshot.photos?.map(photo => [photo.id, photo.index, photo.imageUrls]), [
+    ["photo-001", 1, [photoUrls[0], "https://media.example.com/photo-one-backup.webp"]],
+    ["photo-002", 2, []],
+    ["photo-003", 3, [photoUrls[1]]],
+  ]);
+  assert.deepEqual(snapshot.photos?.[2].motionUrls, [motionUrl, "https://media.example.com/other-quality.mp4"]);
+  assert.equal(snapshot.photos?.[2].durationSeconds, 2.967);
+  assert.equal(snapshot.photos?.[0].motionExpected, false);
+  assert.equal(snapshot.photos?.[2].motionExpected, true);
+});
+
+test("Douyin photos: explicit missing/protected motion stays declared and never uses unrelated nested media", () => {
+  const snapshot = extractDouyinWork(state({ ...galleryWork([
+    { url_list: [photoUrls[0]], live_photo_type: 1 },
+    { url_list: [photoUrls[1]], video: { has_drm: true, play_addr: { url_list: [motionUrl] } } },
+  ]), recommendation: { images: [{ url_list: ["https://media.example.com/unrelated.webp"], video: { play_addr: { url_list: ["https://media.example.com/unrelated.mp4"] } } }] } }), id);
+  assert(snapshot);
+  assert.deepEqual(snapshot.photos?.map(photo => [photo.motionExpected, photo.motionUrls]), [[true, []], [true, []]]);
+  assert.match(snapshot.photos?.[1].reason ?? "", /保护|加密/);
+});
+
+test("Douyin photos: contradictory work identities and per-photo work identities are rejected before media selection", () => {
+  assert.throws(() => extractDouyinWork(state({ ...galleryWork([{ url_list: [photoUrls[0]] }]), awemeId: "6982497745948921092" }), id), /身份/);
+  assert.throws(() => extractDouyinWork(state(galleryWork([{ aweme_id: "6982497745948921092", url_list: [photoUrls[0]] }])), id), /身份/);
+  assert.throws(() => extractDouyinWork(state(galleryWork([{ url_list: [photoUrls[0]], video: { aweme_id: "6982497745948921092", play_addr: { url_list: [motionUrl] } } }])), id), /身份/);
+});
+
+test("Douyin photos: static multi-photo originals are saved as a collection without invoking yt-dlp", async t => {
+  const current = await context(t); const calls = transport(t, state(galleryWork(photoUrls.map(url => ({ url_list: [url] })))));
+  let tools = 0;
+  t.mock.method(globalThis, "fetch", async (url: URL) => {
+    calls.push({ url: String(url), headers: new Headers() });
+    return String(url).startsWith("https://www.douyin.com/") ? new Response(state(galleryWork(photoUrls.map(url => ({ url_list: [url] }))))) : new Response(png, { headers: { "content-type": "image/png", "content-length": String(png.length) } });
+  });
+  const record = await acquireDouyin(noteInput, current, { runTool: async () => { tools++; throw new Error("gallery must not use yt-dlp"); } });
+  assert.equal(record.kind, "gallery"); assert.equal(record.markdown, work.desc);
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 2, JSON.stringify(record));
+  assert.equal(record.assets.filter(asset => asset.role === "video").length, 0);
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "completed");
+  assert.equal(tools, 0);
+});
+
+test("Douyin photos: incomplete HTTP photo data is enriched from the exact browser detail and preserves the original description", async t => {
+  const current = await context(t); const calls = transport(t, state(galleryWork([{ url_list: [photoUrls[0]], live_photo_type: 1 }])));
+  let tools = 0, captures = 0;
+  const record = await acquireDouyin(noteInput, current, {
+    captureBrowser: async (_input, _context, requests) => {
+      captures++; assert.equal(new URL(requests[0].url).searchParams.get("aweme_id"), id);
+      return { finalUrl: noteInput.url, html: "", gated: false, responses: [{ url: requests[0].url, data: { status_code: 0, aweme_detail: { ...galleryWork([{ url_list: [photoUrls[0]], video: { duration: 2967, play_addr: { url_list: [motionUrl] } } }]), desc: "" } } }] };
+    },
+    probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }),
+    runTool: async () => { tools++; throw new Error("gallery must not use yt-dlp"); },
+  });
+  assert.equal(captures, 1); assert.equal(tools, 0); assert.equal(record.markdown, work.desc);
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 1, JSON.stringify(record));
+  assert.equal(record.assets.filter(asset => asset.role === "video" && asset.status === "saved").length, 1, JSON.stringify(record));
+  assert(calls.some(call => call.url === motionUrl));
+});
+
+test("Douyin photos: missing original image or a declared motion stream makes original-mode result partial", async t => {
+  const current = await context(t); transport(t, state(galleryWork([
+    { url_list: [photoUrls[0]], live_photo_type: 1 },
+    { video: { play_addr: { url_list: [motionUrl] }, duration: 2967 } },
+  ])));
+  const record = await acquireDouyin(noteInput, current, { probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }) });
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "partial");
+  assert(record.assets.some(asset => asset.role === "video" && asset.status === "unavailable"));
+  assert(record.assets.some(asset => asset.role === "image" && asset.status === "unavailable"));
+  assert.equal(record.assets.filter(asset => asset.status === "saved").length, 2, JSON.stringify(record));
+});
+
+test("Douyin photos: cancellation after first original preserves its checkpoint and skips later photo requests", async t => {
+  const current = await context(t); const controller = new AbortController(); const calls = transport(t, state(galleryWork(photoUrls.map(url => ({ url_list: [url] })))));
+  const record = await acquireDouyin(noteInput, { ...current, signal: controller.signal, onCheckpoint: async record => {
+    if (record.assets.some(asset => asset.role === "image" && asset.status === "saved")) controller.abort();
+  } });
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 1, JSON.stringify(record));
+  assert.equal(new Set(record.assets.map(asset => asset.id)).size, record.assets.length, "cancellation must not add a duplicate failure for the saved first image");
+  assert(calls.some(call => call.url === photoUrls[0])); assert(!calls.some(call => call.url === photoUrls[1]));
+  const saved = record.assets.find(asset => asset.role === "image" && asset.status === "saved"); assert(saved?.path);
+  assert.deepEqual(await fs.readFile(path.join(current.directory, saved.path)), png);
+});
+
+test("Douyin photos: mixed static and motion originals retain independent ordered assets and movie part IDs", async t => {
+  const current = await context(t); const calls = transport(t, state(galleryWork([
+    { url_list: [photoUrls[0]] },
+    { url_list: [photoUrls[1]], video: { duration: 2967, play_addr: { url_list: [motionUrl] } } },
+  ])));
+  const record = await acquireDouyin(noteInput, current, { probeMedia: async () => ({ video: true, audio: false, durationSeconds: 2.967 }) });
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "completed", JSON.stringify(record));
+  assert.deepEqual(record.assets.map(asset => [asset.role, asset.status]), [["image", "saved"], ["image", "saved"], ["video", "saved"]]);
+  assert.deepEqual(record.assets.filter(asset => asset.role === "image").map(asset => asset.id), ["images/001", "images/002"]);
+  assert.equal(record.parts?.length, 1); assert.equal(record.parts?.[0].status, "saved");
+  assert.equal(record.assets[2].partId, record.parts?.[0].id);
+  assert.deepEqual(calls.map(call => call.url), [noteInput.url, ...photoUrls, motionUrl]);
+});
+
+test("Douyin photos: a known gallery with an unknown empty image list stays explicitly partial", async t => {
+  const current = await context(t); transport(t, state(galleryWork([])));
+  let tools = 0, captures = 0;
+  const record = await acquireDouyin(noteInput, current, {
+    captureBrowser: async () => { captures++; return { finalUrl: noteInput.url, html: "", responses: [], gated: false }; },
+    runTool: async () => { tools++; throw new Error("no yt-dlp gallery inference"); },
+  });
+  assert.equal(captures, 1); assert.equal(tools, 0);
+  assert.equal(record.kind, "gallery"); assert.equal(contentStatus({ ...record, processingMode: "original" }), "partial");
+  assert(record.assets.some(asset => asset.role === "image" && asset.status === "unavailable"));
+  assert.match(record.assets.find(asset => asset.role === "image" && asset.status === "unavailable")?.reason ?? "", /数量|照片|未知/);
+});
+
+test("Douyin photos: a corrupt retry cannot overwrite previously saved original image bytes", async t => {
+  const current = await context(t); transport(t, state(galleryWork([{ url_list: [photoUrls[0]] }])));
+  const previous = await acquireDouyin(noteInput, current);
+  const original = previous.assets.find(asset => asset.role === "image" && asset.status === "saved"); assert(original?.path);
+  const newSource = "https://media.example.com/new-version.webp";
+  t.mock.method(globalThis, "fetch", async (url: URL) => String(url).startsWith("https://www.douyin.com/") ? new Response(state(galleryWork([{ url_list: [newSource] }]))) : new Response("invalid image payload", { headers: { "content-type": "image/png" } }));
+  const retry = await acquireDouyin(noteInput, { ...current, existing: previous });
+  assert.equal(contentStatus({ ...retry, processingMode: "original" }), "partial");
+  assert(!retry.assets.some(asset => asset.status === "saved"));
+  assert.deepEqual(await fs.readFile(path.join(current.directory, original.path)), png);
+  assert.equal(previous.assets[0].status, "saved");
+});
+
+const slidesPath = "/web/api/v2/aweme/slidesinfo/";
+function slidesTransport(t: TestContext, payload: unknown, html = "<html><title>抖音</title></html>") {
+  const calls = transport(t, html);
+  t.mock.method(globalThis, "fetch", async (url: URL, options: RequestInit) => {
+    calls.push({ url: String(url), headers: new Headers(options.headers) });
+    if (new URL(String(url)).pathname === slidesPath) {
+      const rawIds = new URL(String(url)).searchParams.get("aweme_ids") ?? "";
+      const response = /^\[[1-9]\d{14,21}\]$/.test(rawIds) ? payload : { status_code: 0, aweme_details: null };
+      return new Response(JSON.stringify(response), { headers: { "content-type": "application/json" } });
+    }
+    if (String(url).startsWith("https://www.douyin.com/")) return new Response(html, { headers: { "content-type": "text/html" } });
+    return /\.mp4(?:\?|$)/.test(String(url)) ? new Response(photoMotionBytes, { headers: { "content-type": "video/mp4" } }) : new Response(png, { headers: { "content-type": "image/png" } });
+  });
+  return calls;
+}
+
+test("Douyin slides: official photo metadata succeeds when the v1 detail has no target and does not use gallery BGM as motion", async t => {
+  const current = await context(t); const publicId = "7635876375336879226";
+  const submitted = { ...noteInput, nativeId: publicId, url: `https://www.douyin.com/note/${publicId}`, canonicalUrl: `https://www.douyin.com/note/${publicId}` };
+  const details = { ...galleryWork(photoUrls.map(url => ({ url_list: [url], download_url_list: ["https://media.example.com/download-image.webp"], uri: "image-resource", width: 1, height: 1 }))), aweme_id: publicId, video: { has_drm: true, duration: 19000, play_addr: { url_list: ["https://media.example.com/bgm.mp4"] } } };
+  const calls = slidesTransport(t, { status_code: 0, aweme_details: [details] });
+  let captures = 0, tools = 0;
+  const record = await acquireDouyin(submitted, current, {
+    captureBrowser: async () => { captures++; return { finalUrl: submitted.url, html: "", gated: false, responses: [{ url: `https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=${publicId}`, data: { status_code: 0, aweme_detail: null } }] }; },
+    runTool: async () => { tools++; throw new Error("gallery must not invoke yt-dlp"); },
+  });
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 2, JSON.stringify(record));
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "completed");
+  assert.equal(record.assets.filter(asset => asset.role === "video").length, 0); assert.equal(tools, 0); assert.equal(captures, 0);
+  const api = calls.find(call => new URL(call.url).pathname === slidesPath); assert(api);
+  const endpoint = new URL(api.url); assert.equal(endpoint.origin, "https://www.iesdouyin.com");
+  assert.equal(endpoint.searchParams.get("aweme_ids"), `[${publicId}]`, "official API requires a decimal numeric array, preserving all 19 ID digits without Number conversion"); assert.equal(endpoint.searchParams.get("request_source"), "200");
+  assert.equal(api.headers.has("cookie"), false); assert.equal(api.headers.has("authorization"), false);
+  assert(!calls.some(call => call.url.includes("bgm.mp4") || call.url.includes("download-image.webp")));
+});
+
+test("Douyin slides: wrong or contradictory response identities stop before browser or photo requests", async t => {
+  const current = await context(t);
+  for (const details of [
+    [{ ...galleryWork([{ url_list: [photoUrls[0]] }]), aweme_id: "6982497745948921092" }],
+    [galleryWork([{ url_list: [photoUrls[0]] }]), galleryWork([{ url_list: [photoUrls[1]] }])],
+    [{ ...galleryWork([{ url_list: [photoUrls[0]] }]), awemeId: "6982497745948921092" }],
+  ]) {
+    const calls = slidesTransport(t, { status_code: 0, aweme_details: details }); let captures = 0;
+    const record = await acquireDouyin(noteInput, current, { captureBrowser: async () => { captures++; throw new Error("mismatched response must stop"); } });
+    assert(calls.some(call => new URL(call.url).pathname === slidesPath));
+    assert(!record.assets.some(asset => asset.status === "saved")); assert.match(record.warnings.join(" "), /身份|不一致/);
+    assert.equal(captures, 0); assert(!calls.some(call => photoUrls.includes(call.url)));
+  }
+});
+
+test("Douyin slides: incomplete motion metadata falls back to exact Edge detail and keeps known static description", async t => {
+  const current = await context(t); const declared = galleryWork([{ url_list: [photoUrls[0]], live_photo_type: 1 }]);
+  const calls = slidesTransport(t, { status_code: 0, aweme_details: [declared] }); let captures = 0;
+  const record = await acquireDouyin(noteInput, current, {
+    captureBrowser: async (_input, _context, requests) => {
+      captures++; return { finalUrl: noteInput.url, html: "", gated: false, responses: [{ url: requests[0].url, data: { status_code: 0, aweme_detail: { ...galleryWork([{ url_list: [photoUrls[0]], video: { duration: 2967, play_addr: { url_list: [motionUrl] } } }]), desc: "" } } }] };
+    }, probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }),
+  });
+  assert.equal(captures, 1); assert.equal(record.markdown, work.desc);
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 1);
+  assert.equal(record.assets.filter(asset => asset.role === "video" && asset.status === "saved").length, 1);
+  assert(calls.some(call => new URL(call.url).pathname === slidesPath));
+});
+
+test("Douyin slides: a declared missing motion stays partial when the v1 detail is empty", async t => {
+  const current = await context(t); const calls = slidesTransport(t, { status_code: 0, aweme_details: [galleryWork([{ url_list: [photoUrls[0]], live_photo_type: 1 }])] });
+  const record = await acquireDouyin(noteInput, current, { captureBrowser: async (_input, _context, requests) => ({ finalUrl: noteInput.url, html: "", gated: false, responses: [{ url: requests[0].url, data: { status_code: 0, aweme_detail: null } }] }) });
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 1);
+  assert(record.assets.some(asset => asset.role === "video" && asset.status === "unavailable"));
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "partial");
+  assert(calls.some(call => new URL(call.url).pathname === slidesPath));
+});
+
+test("Douyin slides: nonzero status and nested recommendation images cannot supply a photo collection", async t => {
+  const current = await context(t); const calls = slidesTransport(t, { status_code: 1, aweme_details: [galleryWork([{ url_list: [photoUrls[0]] }])], recommendations: { aweme_details: [galleryWork([{ url_list: [photoUrls[1]] }])] } });
+  const record = await acquireDouyin(noteInput, current);
+  assert(calls.some(call => new URL(call.url).pathname === slidesPath)); assert(!record.assets.some(asset => asset.status === "saved"));
+  assert(!calls.some(call => photoUrls.includes(call.url)));
+});
+
+test("Douyin photo URI: declared resource identity is stable and keeps unrelated image_id namespaces separate", () => {
+  const snapshot = extractDouyinWork(state(galleryWork([
+    { uri: "original-resource", image_id: "display-id-one", url_list: [photoUrls[0]] },
+    { uri: "original-resource", image_id: "display-id-two", url_list: [photoUrls[1]] },
+    { image_id: "original-resource", url_list: [photoUrls[0]] },
+  ])), id);
+  assert.deepEqual(snapshot?.photos?.map(photo => [photo.id, photo.index]), [["uri:original-resource", 1], ["uri:original-resource", 2], ["photo-003", 3]]);
+});
+
+test("Douyin photo URI: a conflicting resource cannot pair old static A with motion B or shorten the original denominator", async t => {
+  const current = await context(t); const newB = "https://media.example.com/new-resource-b.webp";
+  const prior = galleryWork([
+    { uri: "resource-A", url_list: [photoUrls[0]], live_photo_type: 1 },
+    { uri: "resource-C", url_list: [photoUrls[1]] },
+  ]);
+  const replacement = galleryWork([{ uri: "resource-B", url_list: [newB], video: { duration: 2967, play_addr: { url_list: [motionUrl] } } }]);
+  const calls = slidesTransport(t, { status_code: 0, aweme_details: [replacement] }, state(prior));
+  const originalTransport = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (url: URL, options: RequestInit) => {
+    if (String(url) === newB) { calls.push({ url: String(url), headers: new Headers(options.headers) }); return new Response("unavailable B", { status: 502 }); }
+    return originalTransport(url, options);
+  });
+  const record = await acquireDouyin(noteInput, current, { probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }) });
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "partial", JSON.stringify(record));
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 2);
+  assert.equal(record.assets.filter(asset => asset.role === "video" && asset.status === "saved").length, 0);
+  assert(record.assets.some(asset => asset.role === "video" && asset.status === "unavailable"));
+  assert.match(record.coverage?.photos ?? "", /2\/2 original photos/);
+  assert(!calls.some(call => call.url === newB || call.url === motionUrl));
+  assert.match(record.warnings.join(" "), /身份|资源|不一致/);
+});
+
+test("Douyin photo URI: the same resource with renewed signed URLs safely enriches its missing motion", async t => {
+  const current = await context(t); const oldSigned = `${photoUrls[0]}?signature=OLD_FIXTURE`, newSigned = `${photoUrls[0]}?signature=NEW_FIXTURE`;
+  const prior = galleryWork([{ uri: "resource-A", image_id: "renderer-A", url_list: [oldSigned], live_photo_type: 1 }]);
+  const enriched = galleryWork([{ uri: "resource-A", image_id: "detail-A", url_list: [newSigned], video: { duration: 2967, play_addr: { url_list: [motionUrl] } } }]);
+  const calls = slidesTransport(t, { status_code: 0, aweme_details: [enriched] }, state(prior));
+  const record = await acquireDouyin(noteInput, current, { probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }) });
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "completed", JSON.stringify(record));
+  assert.equal(record.assets.filter(asset => asset.role === "image" && asset.status === "saved").length, 1);
+  assert.equal(record.assets.filter(asset => asset.role === "video" && asset.status === "saved").length, 1);
+  assert(calls.some(call => call.url === newSigned)); assert(calls.some(call => call.url === motionUrl));
+});
+
+test("Douyin photo URI: the same declared resource at different positions preserves two independent motion members", async t => {
+  const current = await context(t); const secondMotion = `${motionUrl}&position=second`;
+  const duplicate = galleryWork([
+    { uri: "shared-resource", url_list: [photoUrls[0]], video: { duration: 2967, play_addr: { url_list: [motionUrl] } } },
+    { uri: "shared-resource", url_list: [photoUrls[1]], video: { duration: 2967, play_addr: { url_list: [secondMotion] } } },
+  ]);
+  const snapshot = extractDouyinWork(state(duplicate), id);
+  assert.equal(snapshot?.photos?.[0].id, snapshot?.photos?.[1].id);
+  slidesTransport(t, { status_code: 0, aweme_details: [duplicate] }, state(duplicate));
+  const record = await acquireDouyin(noteInput, current, { probeMedia: async () => ({ video: true, audio: true, durationSeconds: 2.967 }) });
+  const movies = record.assets.filter(asset => asset.role === "video" && asset.status === "saved");
+  assert.equal(movies.length, 2); assert.equal(new Set(movies.map(asset => asset.id)).size, 2);
+  assert.equal(new Set(record.parts?.map(part => part.id)).size, 2);
+  assert.equal(contentStatus({ ...record, processingMode: "original" }), "completed");
+});
 
 test("Douyin: original mode completes without unsupported native comments or subtitles",async t=>{
   const current=await context(t);transport(t);const record=await acquireDouyin(input,current,{probeMedia:probe});
@@ -111,10 +394,13 @@ test("Douyin: library budget and cancellation are enforced before saved state", 
   const cancelled = await acquireDouyin(input, { ...current, signal: controller.signal }, { probeMedia: probe }); assert(!cancelled.assets.some(asset => asset.status === "saved")); assert.equal(calls.length, before);
 });
 
-test("Douyin: target image posts retain their original text but do not claim video support", async t => {
+test("Douyin: unknown image fields retain original text without inventing an original image", async t => {
   const current = await context(t); const calls = transport(t, state({ ...work, video: undefined, images: [{ display_image: { url_list: ["https://media.example.com/photo.jpg"] } }] }));
   const content = await acquireDouyin(input, current, { probeMedia: probe }); assert.equal(content.kind, "gallery"); assert.equal(content.markdown, work.desc);
-  assert(!content.assets.some(asset => asset.status === "saved")); assert.equal(calls.length, 1); assert.match(content.warnings.join(" "), /图文|图片/);
+  assert(!content.assets.some(asset => asset.status === "saved")); assert.equal(calls.length, 2);
+  assert.equal(new URL(calls[1].url).pathname, slidesPath);
+  assert(content.assets.some(asset => asset.role === "image" && asset.status === "unavailable"));
+  assert.equal(contentStatus({ ...content, processingMode: "original" }), "partial");
 });
 
 test("Douyin: user pages, collections, live, duplicate identities and fake hosts are not work inputs", async t => {

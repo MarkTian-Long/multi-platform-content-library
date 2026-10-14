@@ -38,7 +38,7 @@ function markdownBody(source:string,files:Set<string>,title:string):string {
 }
 
 function coverageNotes(item:ContentManifest):string[] {
- const labels:Record<string,string>={body:"正文",media:"视频",subtitles:"平台字幕",comments:"评论",danmaku:"弹幕",parts:"视频分段",metadata:"标题与简介"};
+ const labels:Record<string,string>={body:"正文",media:"媒体",photos:"图集原图",livePhotos:"实况照片动态",subtitles:"平台字幕",comments:"评论",danmaku:"弹幕",parts:"视频分段",metadata:"标题与简介"};
  return Object.entries(item.coverage??{}).filter(([key])=>key!=="legacyArticleId").map(([key,value])=>{
    const prefix=key.split(":")[0];
    if(prefix==="part"&&key.endsWith(":duration")&&/unknown|mismatch/.test(value))return "部分视频的时长尚未核实，请核对原视频";

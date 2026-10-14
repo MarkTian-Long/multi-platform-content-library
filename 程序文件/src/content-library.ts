@@ -100,7 +100,10 @@ export function contentStatus(record:CapturedContent):ContentStatus{
     for(const id of record.parts?.length?record.parts.map(p=>p.id):[undefined])for(const role of required)
       if(!record.assets.some(a=>a.role===role&&a.status==="saved"&&(!id||a.partId===id)))return "partial";
   }
-  if(record.kind==="gallery"&&!record.assets.some(a=>a.role==="image"&&a.status==="saved"))return "partial";
+  if(record.kind==="gallery"){
+    if(!record.assets.some(a=>a.role==="image"&&a.status==="saved")||record.parts?.some(part=>part.status!=="saved"))return "partial";
+    if(Object.entries(record.coverage??{}).some(([key,value])=>["media","photos","livePhotos"].includes(key)&&/unknown|not_attempted|failed|unavailable|cancelled/i.test(value)))return "partial";
+  }
   if(record.kind==="audio"&&!(record.processingMode==="original"?["audio"]:["audio","transcript"]).every(role=>record.assets.some(a=>a.role===role&&a.status==="saved")))return "partial";
   return "completed";
 }

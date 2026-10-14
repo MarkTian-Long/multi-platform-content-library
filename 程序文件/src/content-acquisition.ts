@@ -8,6 +8,7 @@ import { resolveEdgeExecutable, isPathWithin } from "./url-policy.js";
 import { fetchPublic, fetchedPublicUrl, savePublicAsset, publicHttpUrl } from "./content-network.js";
 import { parseContentLinks } from "./content-input.js";
 import { extractXiaohongshuSnapshot } from "./content-xiaohongshu.js";
+import { savePhotoCollection, type PhotoMedia, type PhotoMediaDeps } from "./content-photo-media.js";
 import { acquireWechatChannels, type WechatChannelsDeps } from "./content-wechat-channels.js";
 import { acquireYoutube } from "./content-ytdlp-platform.js";
 import { readContentSettings, readParserCredential } from "./content-settings.js";
@@ -20,7 +21,7 @@ import { writableFile,atomicReplace } from "./content-library.js";
 export { openContentLogin } from "./content-network.js";
 
 export interface ToolRunResult { code: number; stdout: string; stderr: string; timedOut: boolean; cancelled: boolean; outputTruncated: boolean; }
-export interface XiaohongshuSnapshot { finalUrl: string; title: string; author?: string; body: string; images: string[]; recommendedImages?: string[]; videos: string[]; videoExpected?: boolean; }
+export interface XiaohongshuSnapshot { finalUrl: string; title: string; author?: string; body: string; images: string[]; recommendedImages?: string[]; videos: string[]; videoExpected?: boolean; photos?: PhotoMedia[]; }
 export interface MediaProbe { video: boolean; audio: boolean; durationSeconds?: number; }
 export interface AcquisitionDeps extends WechatChannelsDeps {
   runTool?: (command: string, args: string[], context: ContentContext) => Promise<ToolRunResult>;
@@ -28,6 +29,7 @@ export interface AcquisitionDeps extends WechatChannelsDeps {
   captureXiaohongshu?: (input: ContentInput, context: ContentContext) => Promise<XiaohongshuSnapshot>;
   captureBrowser?: typeof captureSocialBrowser;
   probeMedia?: (file: string, context: ContentContext) => Promise<MediaProbe | undefined>;
+  photoMedia?: PhotoMediaDeps;
 }
 const BILIBILI_MAX_PARTS = 50;
 const BILIBILI_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -140,7 +142,7 @@ async function publicXiaohongshu(input: ContentInput, context: ContentContext): 
       }
     }
     const snapshot = extractXiaohongshuSnapshot(await boundedHtml(response, signal), finalUrl);
-    return snapshot.body || snapshot.images.length || snapshot.videos.length || snapshot.videoExpected ? snapshot : undefined;
+    return snapshot.body || snapshot.images.length || snapshot.videos.length || snapshot.videoExpected || snapshot.photos?.length ? snapshot : undefined;
   } catch (error) { if (context.signal?.aborted) throw error; return undefined; }
 }
 
@@ -153,13 +155,15 @@ async function acquireXiaohongshu(input: ContentInput, context: ContentContext, 
     if (deps.captureXiaohongshu) snapshot = await deps.captureXiaohongshu(input, context);
     else {
       const publiclyReadable = await publicXiaohongshu(input, context);
-      if (publiclyReadable && (!publiclyReadable.videoExpected || publiclyReadable.videos.length)) snapshot = publiclyReadable;
+      if (publiclyReadable && (!publiclyReadable.videoExpected || publiclyReadable.videos.length) && (!publiclyReadable.photos || publiclyReadable.photos.every(photo => photo.imageUrls.length && (!photo.motionExpected || photo.motionUrls.length)))) snapshot = publiclyReadable;
       else {
+      let closeOnAbort: (() => void) | undefined;
+      try {
       await fs.mkdir(profile, { recursive: true });
       browser = await chromium.launchPersistentContext(profile, { executablePath: resolveEdgeExecutable(), headless: true });
       const page = browser.pages()[0] ?? await browser.newPage();
       await browser.route("**/*", async (route) => { try { await publicHttpUrl(route.request().url()); await route.continue(); } catch { await route.abort(); } });
-      const closeOnAbort = () => void browser?.close(); context.signal?.addEventListener("abort", closeOnAbort, { once: true });
+      closeOnAbort = () => void browser?.close(); context.signal?.addEventListener("abort", closeOnAbort, { once: true });
       context.onProgress?.("正在通过专用小红书 Edge 会话加载笔记主体");
       await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 45_000 });
       await page.waitForFunction(() => /\/login(?:\?|$)/.test(location.href) || !!document.querySelector("#noteContainer,.note-container,.note-detail-mask,[data-note-id]"), undefined, { timeout: 10_000 }).catch(() => {});
@@ -170,8 +174,27 @@ async function acquireXiaohongshu(input: ContentInput, context: ContentContext, 
       const browserNote = parseContentLinks(snapshot.finalUrl)[0]?.nativeId;
       if (publicNote && browserNote && publicNote !== browserNote) throw new Error("浏览器跳转到了其他笔记，未混用页面内容");
       if (publiclyReadable?.videoExpected && publicNote && publicNote === browserNote && !snapshot.videos.length) snapshot = { ...snapshot, videoExpected: true };
-      if (/^\/(?:login|verify|captcha)(?:\/|$)/.test(new URL(page.url()).pathname) || loginPage(await page.locator("body").innerText())) snapshot = { ...snapshot, body: "请登录或完成验证" };
-      context.signal?.removeEventListener("abort", closeOnAbort);
+      if (publiclyReadable?.photos && publicNote && publicNote === browserNote) {
+        const mergedPhotos = new Map(publiclyReadable.photos.map(photo => [photo.index, photo]));
+        for (const photo of snapshot.photos ?? []) {
+          const prior = mergedPhotos.get(photo.index);
+          if (prior && prior.id !== photo.id) {
+            content.warnings.push(`第${photo.index}张照片在公开页与浏览器的身份不同，保留公开页声明，未混用配套动态`);
+            continue;
+          }
+          const motionProtected = photo.motionProtected || prior?.motionProtected;
+          mergedPhotos.set(photo.index, prior ? { ...photo, motionExpected: photo.motionExpected || prior.motionExpected, imageUrls: [...new Set([...photo.imageUrls, ...prior.imageUrls])], motionUrls: motionProtected ? [] : [...new Set([...photo.motionUrls, ...prior.motionUrls])], ...(motionProtected ? { motionProtected: true } : {}) } : photo);
+        }
+        snapshot.photos = [...mergedPhotos.values()].sort((a, b) => a.index - b.index);
+      }
+      if (/^\/(?:login|verify|captcha)(?:\/|$)/.test(new URL(page.url()).pathname) || loginPage(await page.locator("body").innerText())) {
+        if (publiclyReadable && publicNote) { snapshot = publiclyReadable; content.warnings.push("专用浏览器需要登录或验证，已保留公开页可取得内容，未确认缺失动态"); }
+        else snapshot = { ...snapshot, body: "请登录或完成验证" };
+      }
+      } catch (error) {
+        if (context.signal?.aborted || !publiclyReadable) throw error;
+        snapshot = publiclyReadable; content.warnings.push("专用浏览器未补齐媒体，已保留公开页可取得内容，缺失项仍可重试");
+      } finally { if (closeOnAbort) context.signal?.removeEventListener("abort", closeOnAbort); }
       }
     }
     await publicHttpUrl(snapshot.finalUrl);
@@ -188,7 +211,8 @@ async function acquireXiaohongshu(input: ContentInput, context: ContentContext, 
     content.coverage!.body = content.markdown ? "saved: note text" : "unavailable: note body empty";
     await checkpoint(context, content);
     if(snapshot.videoExpected&&!snapshot.videos.length){content.assets.push({id:"video/001",role:"video",status:"unavailable",reason:"该笔记是视频，但本次未取得可下载的视频地址；请核对登录与平台访问条件",provenance:"original"});content.coverage!.media="unavailable: known video has no downloadable stream";await checkpoint(context,content);}
-    for (const [offset, sourceUrl] of snapshot.images.entries()) {const stem=`images/${String(offset + 1).padStart(3, "0")}`;content.assets.push(await savePublicAsset(sourceUrl, context.directory, stem, "image", context.signal, 25 * 1024 * 1024,context.existing?.assets.find(a=>a.id===stem))); await checkpoint(context, content); }
+    if (snapshot.photos?.length || snapshot.photos && content.kind === "gallery") await savePhotoCollection(content, snapshot.photos, context, { ...deps.photoMedia, probeMedia: deps.photoMedia?.probeMedia ?? deps.probeMedia, runTool: deps.photoMedia?.runTool ?? deps.runTool });
+    else for (const [offset, sourceUrl] of snapshot.images.entries()) {const stem=`images/${String(offset + 1).padStart(3, "0")}`;content.assets.push(await savePublicAsset(sourceUrl, context.directory, stem, "image", context.signal, 25 * 1024 * 1024,context.existing?.assets.find(a=>a.id===stem))); await checkpoint(context, content); }
     for (const [offset, sourceUrl] of snapshot.videos.entries()) {
       const stem=`video/${String(offset + 1).padStart(3, "0")}`;
       const asset = await savePublicAsset(sourceUrl, context.directory, stem, "video", context.signal,2*1024*1024*1024,context.existing?.assets.find(a=>a.id===stem));
@@ -201,7 +225,7 @@ async function acquireXiaohongshu(input: ContentInput, context: ContentContext, 
     }
     if(snapshot.videos.length)content.coverage!.media=content.assets.some(a=>a.role==="video"&&a.status==="saved")?"saved: verified video":"unavailable: no verified video";
     return content;
-  } catch (error) { content.warnings.push(publicMessage(error)); content.coverage!.body = "failed"; await checkpoint(context, content); return content; }
+  } catch (error) { content.warnings.push(publicMessage(error)); if (context.signal?.aborted) content.coverage!.media = "cancelled"; else if (content.markdown || content.assets.some(asset => asset.status === "saved")) content.coverage!.media = "failed: photo acquisition interrupted"; else content.coverage!.body = "failed"; await checkpoint(context, content); return content; }
   finally { await browser?.close().catch(() => {}); }
 }
 

@@ -87,16 +87,24 @@ function readableStem(asset: AssetWithCapturePath, capturePath: string, ordinal:
   return roleName[asset.role];
 }
 function readableLabel(asset: AssetWithCapturePath, record: CapturedContent): string {
+  const photo = originalPhotoNumber(asset, record);
+  if (photo !== undefined) return `第${photo}张原图`;
   const part = partInfo(record, asset.partId).prefix;
   const timing = asset.role === "frame" || asset.role === "ocr" ? ` ${timeName(asset.startMs)}` : "";
   const source = asset.provenance === "user_edited" ? " 用户校订" : asset.role === "subtitle" ? ` ${asset.provenance === "machine_asr" ? "机器" : "平台"}${asset.language ? ` ${asset.language}` : ""}` : "";
   return [part, `${roleName[asset.role]}${source}${timing}`].filter(Boolean).join(" · ");
 }
+function originalPhotoNumber(asset: AssetWithCapturePath, record: CapturedContent): number | undefined {
+  if (record.kind !== "gallery" || !["xiaohongshu", "douyin"].includes(record.platform) || asset.role !== "image") return undefined;
+  const match = /^images\/(\d{3,})$/.exec(asset.id), number = match ? Number(match[1]) : 0;
+  return Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
 function candidatePath(asset: AssetWithCapturePath, record: CapturedContent, capturePath: string, ordinal: number, pdfOrdinal: number): string {
   const extension = extensionFor(asset, capturePath);
   if (asset.role === "pdf") return safeFilename(pdfOrdinal === 1 ? `阅读${extension || ".pdf"}` : `阅读 (${pdfOrdinal})${extension || ".pdf"}`, "阅读.pdf", 72);
   const category = categoryByRole[asset.role]; const part = partInfo(record, asset.partId).directory;
-  const stem = readableStem(asset, capturePath, ordinal);
+  const photo = originalPhotoNumber(asset, record);
+  const stem = photo === undefined ? readableStem(asset, capturePath, ordinal) : `原图${String(photo).padStart(3, "0")}`;
   const title=record.parts?.find(part=>part.id===asset.partId)?.title||record.title;
   const mainStem=["video","audio"].includes(asset.role)?`${roleName[asset.role]}${String(ordinal).padStart(3,"0")}-${safeFilename(title,"未命名资料",32)}`:stem;
   const filename = safeFilename(`${mainStem}${extension}`, mainStem, 72);

@@ -10,8 +10,9 @@ import { atomicReplace, containedFile, ensureDirectory, fileHash, publicValue, w
 import { runContentTool } from "./content-tools.js";
 import { isPathWithin } from "./url-policy.js";
 import { captureSocialBrowser, SocialBrowserError, socialBrowserJsonEndpoint, type SocialBrowserSnapshot } from "./content-social-browser.js";
+import type { PhotoMedia, PhotoMediaDeps } from "./content-photo-media.js";
 
-export interface DouyinDeps {
+export interface DouyinDeps extends PhotoMediaDeps {
   ytDlpPath?: string;
   runTool?: (command: string, args: string[], context: ContentContext) => Promise<ContentToolRunResult>;
   probeMedia?: (file: string, context: ContentContext) => Promise<{ video: boolean; audio: boolean; durationSeconds?: number } | undefined>;
@@ -22,7 +23,7 @@ export interface DouyinDeps {
 
 export const DOUYIN_MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_PAGE_BYTES = 6 * 1024 * 1024;
-type Snapshot = { id: string; title?: string; description: string; author?: string; duration?: number; videoUrl?: string; images: boolean; publishedAt?: string };
+type Snapshot = { id: string; title?: string; description: string; author?: string; duration?: number; videoUrl?: string; images: boolean; photos?: PhotoMedia[]; publishedAt?: string };
 class DouyinFailure extends Error { constructor(message: string, readonly status: "failed" | "unavailable" | "login_required" | "missing_dependency" = "failed") { super(message); } }
 
 function address(value: unknown): string | undefined {
@@ -31,16 +32,46 @@ function address(value: unknown): string | undefined {
 }
 function firstAddress(value: unknown): string | undefined { return Array.isArray(value) ? value.map(address).find(Boolean) : undefined; }
 
+function record(value: unknown): Record<string, unknown> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+function addresses(value: unknown): string[] { return Array.isArray(value) ? [...new Set(value.slice(0, 32).map(address).filter((value): value is string => !!value))] : []; }
+function durationSeconds(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value / 1000 : undefined; }
+function exactDeclaredWork(value: Record<string, unknown>, expectedId: string): void {
+  for (const key of ["aweme_id", "awemeId"]) if (value[key] !== undefined && value[key] !== null && value[key] !== expectedId) throw new DouyinFailure("作品或照片声明的抖音作品身份不匹配，未采集", "unavailable");
+}
+
+/** The official detail's ordered images array owns both members of each photo pair. */
+function rawPhotos(value: unknown[], expectedId: string): PhotoMedia[] {
+  if (value.length > 500) throw new DouyinFailure("图集照片数量超过读取上限，未采集", "unavailable");
+  return value.map((value, offset) => {
+    const image = record(value); const video = record(image?.video);
+    if (image) exactDeclaredWork(image, expectedId);
+    if (video) exactDeclaredWork(video, expectedId);
+    const imageUrls = addresses(image?.url_list);
+    const protectedMotion = !!video && ["has_drm", "is_drm", "drm"].some(key => !!video[key]);
+    const motionUrls = protectedMotion ? [] : [...new Set(["play_addr_h264", "play_addr", "download_addr"].flatMap(key => addresses(record(video?.[key])?.url_list)))];
+    const motionExpected = !!motionUrls.length || !!video && Object.keys(video).length > 0 || image?.live_photo_type !== undefined && image.live_photo_type !== null && image.live_photo_type !== 0 && image.live_photo_type !== "0" || image?.clip_type === 5 || image?.clip_type === "5";
+    const reason = protectedMotion ? "该照片动态原视频受保护，未执行解密或采集" : !image ? "该序号的原照片数据缺失或格式未知" : undefined;
+    // uri identifies the original image resource; renderer image_id fields use a different namespace.
+    const uri = typeof image?.uri === "string" ? image.uri.trim() : "";
+    return { id: uri ? `uri:${uri}` : `photo-${String(offset + 1).padStart(3, "0")}`, index: offset + 1, imageUrls, motionUrls, motionExpected, ...(durationSeconds(video?.duration) ? { durationSeconds: durationSeconds(video?.duration) } : {}), ...(reason ? { reason } : {}) };
+  });
+}
+
 function rawWork(value: unknown, expectedId: string): Snapshot | undefined {
   if (!value || typeof value !== "object") return undefined;
   const item = value as Record<string, any>;
   if (typeof item.aweme_id !== "string" || item.aweme_id !== expectedId) return undefined;
-  if (item.is_live || item.live_room || item.video?.has_drm) throw new DouyinFailure("直播或受保护作品不在单条视频保存范围", "unavailable");
-  const video = item.video;
+  exactDeclaredWork(item, expectedId);
+  const gallery = Array.isArray(item.images) && item.images.length > 0 || [2, 68].includes(item.aweme_type);
+  if (item.is_live || item.live_room || !gallery && item.video?.has_drm) throw new DouyinFailure("直播或受保护作品不在单条视频保存范围", "unavailable");
+  // A photo post's top-level video is a slideshow/BGM record, not a motion-photo member.
+  const video = gallery ? undefined : item.video;
   const videoUrl = firstAddress(video?.play_addr_h264?.url_list) || firstAddress(video?.play_addr?.url_list) || firstAddress(video?.download_addr?.url_list);
   const duration = typeof video?.duration === "number" && Number.isFinite(video.duration) && video.duration > 0 ? video.duration / 1000 : undefined;
   const timestamp = typeof item.create_time === "number" && Number.isFinite(item.create_time) && item.create_time > 0 ? new Date(item.create_time * 1000) : undefined;
-  return { id: expectedId, description: typeof item.desc === "string" ? item.desc.trim() : "", author: typeof item.author?.nickname === "string" ? item.author.nickname.trim().slice(0, 240) : undefined, duration, videoUrl, images: Array.isArray(item.images) && item.images.length > 0, publishedAt: timestamp && Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : undefined };
+  const photos = Array.isArray(item.images) ? rawPhotos(item.images, expectedId) : undefined;
+  const images = !!photos?.length || [2, 68].includes(item.aweme_type);
+  return { id: expectedId, description: typeof item.desc === "string" ? item.desc.trim() : "", author: typeof item.author?.nickname === "string" ? item.author.nickname.trim().slice(0, 240) : undefined, duration, videoUrl, images, ...(photos ? { photos } : {}), publishedAt: timestamp && Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : undefined };
 }
 
 function stateCandidates(value: unknown): unknown[] {
@@ -83,11 +114,33 @@ export function extractDouyinWork(html: string, expectedId: string): Snapshot | 
 }
 
 function completeVideo(snapshot: Snapshot | undefined): boolean { return !!snapshot?.videoUrl && !!snapshot.duration; }
+const photoIdentityConflict = (photo: PhotoMedia): boolean => /资源身份.*不一致/.test(photo.reason ?? "");
+function completePhotos(snapshot: Snapshot | undefined): boolean { return !!snapshot?.images && !!snapshot.photos?.length && snapshot.photos.every(photo => !photoIdentityConflict(photo) && !!photo.imageUrls.length && (!photo.motionExpected || !!photo.motionUrls.length)); }
+
+function enrichPhotos(previous: PhotoMedia[] | undefined, next: PhotoMedia[] | undefined): PhotoMedia[] | undefined {
+  if (!previous?.length) return next ?? previous;
+  if (!next?.length) return previous;
+  const count = Math.max(previous.length, next.length);
+  return Array.from({ length: count }, (_, offset) => {
+    const before = previous[offset], after = next[offset];
+    if (!before && after) return after;
+    if (!after && before) return before;
+    if (!before || !after) throw new DouyinFailure("图集照片序号缺失，未采集", "unavailable");
+    if (before.index !== after.index) throw new DouyinFailure("图集照片原序号不匹配，未采集", "unavailable");
+    const beforeUri = before.id.startsWith("uri:"), afterUri = after.id.startsWith("uri:");
+    if (beforeUri && afterUri && before.id !== after.id) {
+      return { ...before, motionExpected: before.motionExpected || after.motionExpected, reason: `第${before.index}张原照片资源身份与补充来源不一致，已保留此前原图，未混用动态` };
+    }
+    const id = afterUri ? after.id : before.id;
+    const protectedReason = [before.reason, after.reason].find(reason => /受保护|加密/.test(reason ?? ""));
+    return { ...before, ...after, id, imageUrls: [...new Set([...after.imageUrls, ...before.imageUrls])], motionUrls: protectedReason ? [] : [...new Set([...after.motionUrls, ...before.motionUrls])], motionExpected: before.motionExpected || after.motionExpected, durationSeconds: after.durationSeconds ?? before.durationSeconds, reason: protectedReason ?? after.reason };
+  });
+}
 
 /** Only missing fields are enriched; an exact original description is never erased. */
 function enrichSnapshot(previous: Snapshot | undefined, next: Snapshot): Snapshot {
   if (!previous) return next;
-  return { ...previous, title: previous.title || next.title, description: previous.description || next.description, author: previous.author || next.author, publishedAt: previous.publishedAt || next.publishedAt, duration: next.duration || previous.duration, videoUrl: next.videoUrl || previous.videoUrl, images: previous.images || next.images };
+  return { ...previous, title: previous.title || next.title, description: previous.description || next.description, author: previous.author || next.author, publishedAt: previous.publishedAt || next.publishedAt, duration: next.duration || previous.duration, videoUrl: next.videoUrl || previous.videoUrl, images: previous.images || next.images, photos: enrichPhotos(previous.photos, next.photos) };
 }
 
 function browserWork(browser: SocialBrowserSnapshot, expectedId: string): Snapshot | undefined {
@@ -148,6 +201,32 @@ async function readPage(response: Response, signal: AbortSignal): Promise<string
   } finally { signal.removeEventListener("abort", abort); await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 
+/** The anonymously readable official gallery endpoint returns only the submitted work. */
+async function slidesMetadata(expectedId: string, context: ContentContext): Promise<Snapshot | undefined> {
+  const signal = AbortSignal.any([context.signal!, AbortSignal.timeout(45000)]);
+  const endpoint = new URL("https://www.iesdouyin.com/web/api/v2/aweme/slidesinfo/");
+  // The official API takes JSON numeric IDs; the reference already validates decimal digits.
+  // Construct the JSON text directly so a 19-digit ID never passes through a lossy Number.
+  endpoint.searchParams.set("aweme_ids", `[${expectedId}]`); endpoint.searchParams.set("request_source", "200");
+  context.onProgress?.("正在读取抖音官方图集原件列表");
+  const response = await fetchPublic(endpoint, { method: "GET", redirect: "error", credentials: "omit", headers: { Accept: "application/json" } }, signal);
+  if (!response.ok) { await response.body?.cancel().catch(() => {}); return undefined; }
+  let data: Record<string, unknown> | undefined;
+  try { data = record(JSON.parse(await readPage(response, signal))); }
+  catch (error) { signal.throwIfAborted(); if (error instanceof SyntaxError) return undefined; throw error; }
+  if (data?.status_code !== 0 || !Array.isArray(data.aweme_details)) return undefined;
+  const matches: Snapshot[] = [];
+  for (const value of data.aweme_details) {
+    const item = record(value);
+    if (!item || item.aweme_id !== expectedId) throw new DouyinFailure("抖音图集接口返回的作品身份不匹配，未采集", "unavailable");
+    const snapshot = rawWork(item, expectedId);
+    if (snapshot) matches.push(snapshot);
+  }
+  const unique = new Map(matches.map(snapshot => [JSON.stringify(snapshot), snapshot]));
+  if (unique.size > 1) throw new DouyinFailure("抖音图集接口返回多个不一致主体，未采集", "unavailable");
+  return unique.values().next().value;
+}
+
 async function metadata(reference: { nativeId: string; canonicalUrl: string }, context: ContentContext, deps: DouyinDeps, cookieFile?: string): Promise<Snapshot> {
   const command = await executable(context.runtimeRoot, "yt-dlp", deps.ytDlpPath ?? process.env.CONTENT_YTDLP_PATH);
   if (!command) throw new DouyinFailure("当前作品页没有直链，且未找到 yt-dlp", "missing_dependency");
@@ -200,6 +279,8 @@ export async function acquireDouyin(input: ContentInput, context: ContentContext
     const retainBody = () => {
       if (!snapshot) return;
       content.markdown = snapshot.description; content.author = snapshot.author; content.publishedAt = snapshot.publishedAt;
+      if (snapshot.images) content.kind = "gallery";
+      for (const photo of snapshot.photos ?? []) if (photoIdentityConflict(photo) && photo.reason && !content.warnings.includes(photo.reason)) content.warnings.push(photo.reason);
       content.title = (snapshot.title || snapshot.description).replace(/\s+/g, " ").trim().slice(0, 160) || content.title;
       content.coverage!.body = content.markdown ? "saved: exact-work original description" : "unavailable: no original description";
     };
@@ -218,10 +299,21 @@ export async function acquireDouyin(input: ContentInput, context: ContentContext
       if (challengeElement || !snapshot && verificationText) throw new DouyinFailure("作品页要求验证；请在应用专用窗口人工完成", "login_required");
     } catch (error) {
       signal.throwIfAborted();
-      if (error instanceof Error && /私网|不能包含账号|不允许访问本机|多个不一致主体/.test(error.message)) throw error;
+      if (error instanceof Error && /私网|不能包含账号|不允许访问本机|多个不一致主体|声明的抖音作品身份|图集照片数量超过/.test(error.message)) throw error;
       httpError = error;
     }
-    if ((httpError || !completeVideo(snapshot)) && !snapshot?.images) {
+    if ((reference.kind === "note" || snapshot?.images) && !completePhotos(snapshot)) {
+      signal.throwIfAborted();
+      try {
+        const exact = await slidesMetadata(reference.nativeId, current);
+        if (exact) { snapshot = enrichSnapshot(snapshot, exact); retainBody(); if (completePhotos(snapshot)) httpError = undefined; }
+      } catch (error) {
+        signal.throwIfAborted();
+        if (error instanceof Error && /私网|不能包含账号|不允许访问本机|作品身份不匹配|多个不一致主体|图集照片数量超过/.test(error.message)) throw error;
+        // An unavailable public endpoint does not erase known exact photo metadata; Edge may still enrich it.
+      }
+    }
+    if (httpError || (reference.kind === "note" || snapshot?.images ? !completePhotos(snapshot) : !completeVideo(snapshot))) {
       signal.throwIfAborted(); current.onProgress?.("通过专用抖音 Edge 会话读取当前作品");
       let browser: SocialBrowserSnapshot | undefined;
       let browserError: unknown;
@@ -250,11 +342,15 @@ export async function acquireDouyin(input: ContentInput, context: ContentContext
         }
       }
     }
-    if (!snapshot && reference.kind === "note") throw new DouyinFailure("当前只支持单条原视频；图文作品图片暂未采集", "unavailable");
+    if (!snapshot && reference.kind === "note") throw new DouyinFailure("未取得身份核验通过的抖音图集照片数据", "unavailable");
     if (!snapshot) throw new DouyinFailure("未取得身份核验通过的抖音作品数据", "unavailable");
     retainBody();
     await current.onCheckpoint?.(content);
-    if (reference.kind === "note" || snapshot.images) { content.kind = "gallery"; throw new DouyinFailure("当前只支持单条原视频；图文作品原文已保留，图片暂未采集", "unavailable"); }
+    if (reference.kind === "note" || snapshot.images) {
+      signal.throwIfAborted(); content.kind = "gallery";
+      const { savePhotoCollection } = await import("./content-photo-media.js");
+      return await savePhotoCollection(content, snapshot.photos ?? [], current, deps);
+    }
     if (!snapshot.videoUrl || !snapshot.duration || deps.maxDurationSeconds !== undefined && snapshot.duration > deps.maxDurationSeconds) throw new DouyinFailure("原视频地址或完整时长不可核验，或超过本次样本预算", "unavailable");
     await publicHttpUrl(snapshot.videoUrl, signal);
     content.parts = [{ id: reference.nativeId, title: content.title, status: "unavailable", durationSeconds: snapshot.duration }];
@@ -275,7 +371,9 @@ export async function acquireDouyin(input: ContentInput, context: ContentContext
   } catch (error) {
     const reason = context.signal?.aborted ? "抖音采集已取消" : signal.aborted ? "抖音采集超时" : error instanceof DouyinFailure ? error.message : "抖音采集失败（网络、会话或本地文件异常）";
     const status = context.signal?.aborted || signal.aborted ? "unavailable" : error instanceof DouyinFailure ? error.status : "failed";
-    if (!content.assets.some(asset => asset.role === "video" && asset.status === "saved")) content.assets.push({ id: content.kind === "gallery" ? "images/001" : "video/001", role: content.kind === "gallery" ? "image" : "video", status, reason, provenance: "original" });
+    const failureId = content.kind === "gallery" ? "images/001" : "video/001";
+    const savedOriginal = content.assets.some(asset => asset.status === "saved" && (asset.role === "video" || content.kind === "gallery" && asset.role === "image"));
+    if (!savedOriginal && !content.assets.some(asset => asset.id === failureId)) content.assets.push({ id: failureId, role: content.kind === "gallery" ? "image" : "video", status, reason, provenance: "original" });
     if (content.parts?.[0] && content.parts[0].status !== "saved") { content.parts[0].status = status === "failed" ? "failed" : "unavailable"; content.parts[0].reason = reason; }
     content.coverage!.media = context.signal?.aborted ? "cancelled" : `${status}: ${reason}`; content.warnings.push(publicValue(reason)); await current.onCheckpoint?.(content); return content;
   } finally {

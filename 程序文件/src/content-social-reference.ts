@@ -19,8 +19,8 @@ export function douyinWorkReference(value: string): DouyinReference | undefined 
     const modal = url.searchParams.getAll("modal_id");
     if (modal.length > 1 || modal.length === 1 && modal[0] !== id) return undefined;
   } else if (["iesdouyin.com", "www.iesdouyin.com"].includes(host)) {
-    const match = /^\/share\/(video|note)\/(\d+)$/.exec(pathname);
-    if (match) { id = match[2]; kind = match[1] as typeof kind; }
+    const match = /^\/share\/(video|note|slides)\/(\d+)$/.exec(pathname);
+    if (match) { id = match[2]; kind = match[1] === "video" ? "video" : "note"; }
   }
   return id && WORK_ID.test(id) ? { nativeId: id, canonicalUrl: `https://www.douyin.com/${kind}/${id}`, kind } : undefined;
 }

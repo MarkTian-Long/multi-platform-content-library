@@ -22,6 +22,24 @@ test("Douyin shares preserve their own platform before resolution, without recog
     assert.equal(parseContentLinks(url)[0].platform, "web", url);
 });
 
+test("Douyin official slides shares identify the same gallery before any later verification redirect", async t => {
+  const id = "7635876375336879226", canonicalUrl = `https://www.douyin.com/note/${id}`;
+  for (const host of ["iesdouyin.com", "www.iesdouyin.com"]) {
+    const url = `https://${host}/share/slides/${id}/?from=share`;
+    assert.deepEqual(douyinWorkReference(url), { nativeId: id, canonicalUrl, kind: "note" });
+    assert.equal(parseContentLinks(url)[0].platform, "douyin");
+  }
+  t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  t.mock.method(globalThis, "fetch", async (value: string | URL) => {
+    const url = new URL(value);
+    return url.hostname === "v.douyin.com" ? new Response(null, { status: 302, headers: { location: `https://www.iesdouyin.com/share/slides/${id}/` } })
+      : url.pathname.startsWith("/share/slides/") ? new Response(null, { status: 302, headers: { location: "https://www.douyin.com/passport/login" } }) : new Response("verification");
+  });
+  const result = await resolveContentInput(parseContentLinks("https://v.douyin.com/ExampleGallery/")[0]);
+  assert.equal(result.nativeId, id); assert.equal(result.canonicalUrl, canonicalUrl);
+  for (const invalid of [`https://iesdouyin.com/share/slides/${id}/extra`, `https://iesdouyin.com.evil.example/share/slides/${id}`, "https://iesdouyin.com/share/slides/short"]) assert.equal(douyinWorkReference(invalid), undefined);
+});
+
 test("Weibo decimal MID and base62 BID are canonical aliases, with no floating point loss", () => {
   for (const [mid, bid] of [["4910815147462302", "N4xlMvjhI"], ["4189191225395228", "FBqgOmDxO"], ["4797700463137878", "LEZDodaiW"]]) {
     assert.equal(weiboMidToBid(mid), bid); assert.equal(weiboBidToMid(bid), mid);
