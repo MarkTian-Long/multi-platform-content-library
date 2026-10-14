@@ -7,27 +7,33 @@ import type { CapturedContent, ContentAsset, ContentListItem, ContentManifest, C
 import { isPathWithin } from "./url-policy.js";
 import { contentFolderName,planAssetNames } from "./content-naming.js";
 import { rewriteLocalAssetLinks } from "./content-paths.js";
+import { contentDisplayTitle } from "./content-display.js";
+import { requestedProcessingAsset } from "./content-processing.js";
 
 const ID = /^[a-f0-9]{24}$/;
 const secret = /token|secret|signature|authorization|cookie|session|sessdata|vkey|auth_key|^(?:sign|sig|key|expires|deadline|wstime|txtime|xsec_source)$/i;
 export function publicUrl(value:string):string {
-  try { const url=new URL(value);if(!["https:","http:"].includes(url.protocol))return "";url.username="";url.password="";
+  try { if(/^local:\/\/sha256\/[a-z0-9]+\/[a-f0-9]{64}$/.test(value))return value;const url=new URL(value);if(!["https:","http:"].includes(url.protocol))return "";url.username="";url.password="";
     for(const key of [...url.searchParams.keys()])if(secret.test(key))url.searchParams.delete(key);return url.toString();
   }catch{return value;}
 }
-function redactText(value:string):string{return value.replace(/https?:\/\/[^\s<>"'）\]]+/gi,publicUrl).replace(/((?:xsec_token|access_token|auth_key|authorization|cookie|sessdata|token|signature|sign|sig|vkey)\s*[:=]\s*)[^\s,;"'}]+/gi,"$1[已隐藏]");}
+function redactText(value:string):string{return value.replace(/https?:\/\/[^\s<>"'）\]]+/gi,publicUrl).replace(/((?:proxy-)?authorization\s*[:=]\s*["']?(?:bearer|basic)\s+)[^\s,;"'}]+/gi,"$1[已隐藏]").replace(/((?:xsec_token|access_token|auth_key|authorization|cookie|sessdata|token|signature|sign|sig|vkey)\s*[:=]\s*)[^\s,;"'}]+/gi,"$1[已隐藏]");}
 /** Single egress filter for CLI, MCP, reading pages and export. */
 export function publicValue<T>(value:T):T {
   if(typeof value==="string")return redactText(value) as T;
   if(Array.isArray(value))return value.map(item=>publicValue(item)) as T;
-  if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value).filter(([key])=>!(key==="sourceUrl"&&"role" in value)).map(([key,item])=>[key,secret.test(key)?"[已隐藏]":publicValue(item)])) as T;return value;
+  if(value&&typeof value==="object")return Object.fromEntries(Object.entries(value).filter(([key])=>!(key==="sourceUrl"&&"role" in value)&&!(key==="localPath"&&"platform" in value&&value.platform==="local")).map(([key,item])=>[key,secret.test(key)?"[已隐藏]":publicValue(item)])) as T;return value;
 }
 export function contentIdentity(record:Pick<CapturedContent,"platform"|"nativeId"|"canonicalUrl">):string{return crypto.createHash("sha256").update(`${record.platform}:${record.nativeId||publicUrl(record.canonicalUrl)}`).digest("hex").slice(0,24);}
 export async function contentDirectory(root:string,id:string):Promise<string>{
   if(!ID.test(id))throw new Error("资料标识无效");
   const legacy=path.join(root,"items",id);
   if((await loadManifest(legacy))?.contentId===id)return legacy;
-  for(const entry of await fs.readdir(path.join(root,"items"),{withFileTypes:true}).catch(()=>[])){
+  const entries=await fs.readdir(path.join(root,"items"),{withFileTypes:true}).catch(()=>[]);
+  const hint=`[${id.slice(0,8)}]`;
+  // Naming is only a search-order hint; the full contained manifest must still match.
+  entries.sort((a,b)=>Number(b.name.includes(hint))-Number(a.name.includes(hint)));
+  for(const entry of entries){
     if(!entry.isDirectory()||entry.isSymbolicLink()||entry.name===id)continue;
     const directory=path.join(root,"items",entry.name);if((await loadManifest(directory))?.contentId===id)return directory;
   }return legacy;
@@ -76,16 +82,26 @@ async function verifiedAsset(directory:string,asset:ContentAsset):Promise<boolea
   if(asset.status!=="saved"||!asset.path)return false;try{const file=await containedFile(directory,asset.path),size=(await fs.stat(file)).size;
     return size>0&&(!asset.bytes||asset.bytes===size)&&(!asset.sha256||asset.sha256===await fileHash(file));}catch{return false;}
 }
+function derivedSourceChanged(asset:ContentAsset,previous:ContentManifest|undefined,assets:ContentAsset[]):boolean{
+  if(asset.derivation){const source=assets.find(a=>a.id===asset.derivation!.sourceId);return source?.integrityFailed===true||(source?.status==="saved"&&!!source.sha256&&source.sha256!==asset.derivation.sourceSha256);}
+  if(!previous||!(["machine_asr","machine_ocr","sampled_frame"].includes(asset.provenance??"")||(asset.provenance==="generated"&&["audio","transcript"].includes(asset.role))))return false;
+  let sources=previous.assets.filter(a=>a.status==="saved"&&a.sha256&&["video","audio","image","subtitle"].includes(a.role));
+  const labelled=sources.filter(a=>asset.label===a.id||asset.label===`由 ${a.id} 提取的音轨`);if(labelled.length)sources=labelled;
+  return sources.some(prior=>{const current=assets.find(a=>a.id===prior.id&&a.status==="saved");return !!current?.sha256&&current.sha256!==prior.sha256;});
+}
 export function contentStatus(record:CapturedContent):ContentStatus{
-  if(!record.markdown.trim()&&!record.assets.some(a=>a.status==="saved"&&["video","image","transcript"].includes(a.role)))return "failed";
-  if(record.warnings.length||record.assets.some(a=>a.status!=="saved"))return "partial";
+  if(!record.markdown.trim()&&!record.assets.some(a=>a.status==="saved"&&["video","audio","image","transcript"].includes(a.role)))return "failed";
+  if(record.warnings.length||record.assets.some(a=>a.status!=="saved"&&requestedProcessingAsset(a,record.processingMode,record.kind)))return "partial";
+  if(["douyin","weibo"].includes(record.platform)&&record.coverage?.body&&!record.coverage.body.startsWith("saved"))return "partial";
   if(record.kind==="video"){
     if(record.parts?.some(p=>p.status!=="saved"))return "partial";
     if(record.coverage&&Object.entries(record.coverage).some(([key,value])=>/part|media|comments|danmaku/.test(key)&&/unknown|not_attempted|failed|unavailable|mismatch/i.test(value)))return "partial";
-    for(const id of record.parts?.length?record.parts.map(p=>p.id):[undefined])for(const role of ["video","audio","transcript","frame","ocr"])
+    const required=record.processingMode==="original"?["video"]:record.processingMode==="transcribe"?["video","transcript"]:["video","audio","transcript","frame","ocr"];
+    for(const id of record.parts?.length?record.parts.map(p=>p.id):[undefined])for(const role of required)
       if(!record.assets.some(a=>a.role===role&&a.status==="saved"&&(!id||a.partId===id)))return "partial";
   }
   if(record.kind==="gallery"&&!record.assets.some(a=>a.role==="image"&&a.status==="saved"))return "partial";
+  if(record.kind==="audio"&&!(record.processingMode==="original"?["audio"]:["audio","transcript"]).every(role=>record.assets.some(a=>a.role===role&&a.status==="saved")))return "partial";
   return "completed";
 }
 const localHref=(file:string)=>file.split(/[\\/]/).map(encodeURIComponent).join("/");
@@ -107,7 +123,7 @@ export async function saveContent(root:string,record:CapturedContent,stage:strin
   await ensureDirectory(directory);const merged:ContentAsset[]=[];const sources=new Map<string,string>();
   for(const incoming of record.assets){
     const prior=previous?.assets.find(a=>a.id===incoming.id);
-    if(incoming.status!=="saved"&&prior&&await verifiedAsset(directory,prior)){merged.push({...prior});sources.set(prior.id,await containedFile(directory,prior.path!));continue;}
+    if(incoming.status!=="saved"&&!incoming.integrityFailed&&prior&&await verifiedAsset(directory,prior)){merged.push({...prior});sources.set(prior.id,await containedFile(directory,prior.path!));continue;}
     if(incoming.status==="saved"&&incoming.path){
       const source=await containedFile(stage,incoming.path),bytes=(await fs.stat(source)).size;
       if(bytes===0){merged.push({...incoming,status:"failed",reason:"文件为空，未标记保存成功"});continue;}
@@ -118,6 +134,10 @@ export async function saveContent(root:string,record:CapturedContent,stage:strin
     if(prior.status==="saved"&&await verifiedAsset(directory,prior)){merged.push({...prior});sources.set(prior.id,await containedFile(directory,prior.path!));}
     else merged.push(prior.status!=="saved"?{...prior}:{...prior,status:"failed",reason:"已存文件缺失或完整性校验失败，请重试补充"});
   }
+  for(let changed=true;changed;){changed=false;for(const asset of merged)if(asset.status==="saved"&&derivedSourceChanged(asset,previous,merged)){
+    const failure=record.assets.find(a=>a.id===asset.id&&a.status!=="saved")?.reason;
+    asset.status="failed";asset.integrityFailed=true;asset.reason=["原始素材已变化，旧派生结果不作为本次成功产物，请重试生成",failure].filter(Boolean).join("；");changed=true;
+  }}
   const assets=planAssetNames({...record,assets:merged},previous?.namingVersion===1?previous.assets:undefined);
   const mapping=new Map<string,string>(),remoteMapping=new Map<string,string>();
   for(const asset of assets)if(asset.status==="saved"&&asset.path){
@@ -156,9 +176,10 @@ export async function findContent(root:string,query=""):Promise<ContentListItem[
   const needle=query.toLocaleLowerCase(),result:ContentListItem[]=[];
   for(const {directory,manifest:m} of await listManifests(root)){
     if(needle&&!`${m.title} ${m.author??""} ${m.canonicalUrl} ${m.markdown}`.toLocaleLowerCase().includes(needle))continue;
-    const media=m.assets.find(a=>a.role==="video"&&a.status==="saved"),pdf=m.assets.find(a=>a.role==="pdf"&&a.status==="saved");
+    const media=m.assets.find(a=>a.role==="video"&&a.status==="saved"),audio=m.assets.find(a=>a.role==="audio"&&a.status==="saved"),pdf=m.assets.find(a=>a.role==="pdf"&&a.status==="saved"),original=m.platform==="local"?m.assets.find(a=>a.provenance==="original"&&a.status==="saved"):undefined;
     const readingPath=await containedFile(directory,m.readingFile).catch(()=>undefined);if(!readingPath)continue;
-    result.push({contentId:m.contentId,title:m.title,platform:m.platform,kind:m.kind,status:m.status,directory,readingPath,pdfPath:pdf?.path?await containedFile(directory,pdf.path).catch(()=>undefined):undefined,videoPath:media?.path?await containedFile(directory,media.path).catch(()=>undefined):undefined,sourceUrl:publicUrl(m.canonicalUrl),capturedAt:m.capturedAt});
+    const transcript=m.assets.filter(a=>["transcript","ocr"].includes(a.role)&&a.status==="saved"&&a.path).sort((a,b)=>Number(b.provenance==="user_edited")-Number(a.provenance==="user_edited")||Number(b.role==="transcript")-Number(a.role==="transcript"))[0];
+    result.push({contentId:m.contentId,title:m.title,displayTitle:contentDisplayTitle(m.title),platform:m.platform,kind:m.kind,status:m.status,directory,readingPath,pdfPath:pdf?.path?await containedFile(directory,pdf.path).catch(()=>undefined):undefined,videoPath:media?.path?await containedFile(directory,media.path).catch(()=>undefined):undefined,audioPath:audio?.path?await containedFile(directory,audio.path).catch(()=>undefined):undefined,originalPath:original?.path?await containedFile(directory,original.path).catch(()=>undefined):undefined,transcriptPath:transcript?.path?await containedFile(directory,transcript.path).catch(()=>undefined):undefined,sourceUrl:publicUrl(m.canonicalUrl),capturedAt:m.capturedAt});
   }return result;
 }
 export async function contentFile(root:string,id:string,relative:string):Promise<string>{return containedFile(await contentDirectory(root,id),relative);}
@@ -171,11 +192,20 @@ export async function readContent(root:string,id:string,offset=0,limit=16000):Pr
 export async function exportContent(root:string,id:string):Promise<{directory:string}>{
   const source=await contentDirectory(root,id),original=await loadManifest(source);if(!original)throw new Error("资料不存在");
   const manifest=publicValue(original),directory=path.join(root,"exports",`${contentFolderName(original,id)} - ${new Date().toISOString().replace(/[:.]/g,"-")}-${crypto.randomUUID().slice(0,4)}`);await ensureDirectory(directory);
+  try{
   delete manifest.bodyFile;
-  manifest.assets=manifest.assets.filter(a=>!["source","reading","pdf"].includes(a.role));manifest.aliases=[publicUrl(manifest.canonicalUrl)];
+  manifest.assets=manifest.assets.filter(a=>!["reading","pdf"].includes(a.role)&&(a.role!=="source"||(manifest.platform==="local"&&a.provenance==="original")));manifest.aliases=[publicUrl(manifest.canonicalUrl)];
   for(const a of manifest.assets)if(a.status==="saved"&&a.path){const from=await containedFile(source,a.path),to=await writableFile(directory,a.path);
-    if(["subtitle","transcript","ocr","comments","danmaku"].includes(a.role)){await fs.writeFile(to,redactText(await fs.readFile(from,"utf8")),"utf8");a.bytes=(await fs.stat(to)).size;a.sha256=await fileHash(to);}else await fs.copyFile(from,to);delete a.sourceUrl;
+    const bytes=(await fs.stat(from)).size,sha256=await fileHash(from);
+    if(bytes<=0||a.bytes!==undefined&&a.bytes!==bytes||a.sha256!==undefined&&a.sha256!==sha256)throw new Error("原件在程序外变化或完整性校验失败，请核对后再导出");
+    if(["subtitle","transcript","ocr","comments","danmaku"].includes(a.role)){await fs.writeFile(to,redactText(await fs.readFile(from,"utf8")),"utf8");a.bytes=(await fs.stat(to)).size;a.sha256=await fileHash(to);}else{await fs.copyFile(from,to);if((await fs.stat(to)).size!==bytes||await fileHash(to)!==sha256)throw new Error("导出期间原件变化，未发布资料包");a.bytes=bytes;a.sha256=sha256;}
+    if(await fileHash(from)!==sha256)throw new Error("导出期间原件变化，未发布资料包");delete a.sourceUrl;
   }
   manifest.markdownFile="资料正文.md";manifest.readingFile="阅读.html";
   await fs.writeFile(path.join(directory,manifest.markdownFile),redactText(original.markdown),"utf8");await fs.writeFile(path.join(directory,manifest.readingFile),renderContentHtml(manifest,redactText(original.markdown)),"utf8");await atomicJson(path.join(directory,"content.json"),manifest);return {directory};
+  }catch(error){
+    const destination=await fs.realpath(directory),exportsRoot=await fs.realpath(path.join(root,"exports"));
+    if(path.dirname(destination)===exportsRoot&&!(await fs.lstat(directory)).isSymbolicLink())await fs.rm(destination,{recursive:true,force:true});
+    throw error;
+  }
 }

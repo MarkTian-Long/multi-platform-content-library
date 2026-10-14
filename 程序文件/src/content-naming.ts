@@ -34,7 +34,7 @@ export function safeFilename(value: string, fallback = "未命名", maxLength = 
 }
 
 const platformName: Record<CapturedContent["platform"], string> = {
-  wechat: "微信", xiaohongshu: "小红书", bilibili: "B站", web: "网页"
+  wechat: "微信", wechat_channels: "微信视频号", xiaohongshu: "小红书", bilibili: "B站", youtube: "YouTube", douyin: "抖音", weibo: "微博", local: "本地文件", web: "网页"
 };
 
 export function contentFolderName(record: Pick<CapturedContent, "title" | "platform">, id: string): string {
@@ -80,7 +80,7 @@ function sourceStem(asset: AssetWithCapturePath, capturePath: string): string {
 function readableStem(asset: AssetWithCapturePath, capturePath: string, ordinal: number): string {
   const source = asset.provenance === "machine_asr" ? "机器" : asset.provenance === "platform_subtitle" ? "平台" : "";
   if (asset.role === "subtitle") return `字幕-${safeFilename(asset.language || "未知语言", "未知语言", 16)}-${source || "平台"}`;
-  if (asset.role === "transcript") return `${source === "平台" ? "平台字幕文字稿" : source === "机器" ? "语音文字稿" : "文字稿"}`;
+  if (asset.role === "transcript") return asset.provenance === "user_edited" ? "校订文字稿" : `${source === "平台" ? "平台字幕文字稿" : source === "机器" ? "语音文字稿" : "文字稿"}`;
   if (asset.role === "frame") return `截图-${timeName(asset.startMs)}-${String(ordinal).padStart(3, "0")}`;
   if (asset.role === "ocr") return `图片文字-${timeName(asset.startMs)}-${String(ordinal).padStart(3, "0")}`;
   if (asset.role === "source" || asset.role === "reading") return sourceStem(asset, capturePath);
@@ -89,7 +89,7 @@ function readableStem(asset: AssetWithCapturePath, capturePath: string, ordinal:
 function readableLabel(asset: AssetWithCapturePath, record: CapturedContent): string {
   const part = partInfo(record, asset.partId).prefix;
   const timing = asset.role === "frame" || asset.role === "ocr" ? ` ${timeName(asset.startMs)}` : "";
-  const source = asset.role === "subtitle" ? ` ${asset.provenance === "machine_asr" ? "机器" : "平台"}${asset.language ? ` ${asset.language}` : ""}` : "";
+  const source = asset.provenance === "user_edited" ? " 用户校订" : asset.role === "subtitle" ? ` ${asset.provenance === "machine_asr" ? "机器" : "平台"}${asset.language ? ` ${asset.language}` : ""}` : "";
   return [part, `${roleName[asset.role]}${source}${timing}`].filter(Boolean).join(" · ");
 }
 function candidatePath(asset: AssetWithCapturePath, record: CapturedContent, capturePath: string, ordinal: number, pdfOrdinal: number): string {

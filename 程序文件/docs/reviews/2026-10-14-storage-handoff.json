@@ -1,0 +1,73 @@
+{
+  "status": "SOURCE_FROZEN_FOR_MAIN_INTEGRATION",
+  "frozenAt": "2026-10-14T04:35:36.3031228Z",
+  "sourceFiles": [
+    {
+      "path": "src/content-storage.ts",
+      "sha256": "1914907358f34f5657ed76fe7267fd84a71b5da02d52774e2a7b39e677fef0d5"
+    },
+    {
+      "path": "tests/content-storage.test.ts",
+      "sha256": "800a764746c59fef88a90cfcd1e34ce0ca85addab6c2cddae953647922fd7177"
+    }
+  ],
+  "exports": [
+    "inspectContentStorage(root: string, options?: {signal?: AbortSignal}): Promise<ContentStoragePlan>",
+    "reclaimContentStaging(root: string, options: {jobIds: string[], expectedPlanId?: string, signal?: AbortSignal}): Promise<ContentStorageCleanupResult>"
+  ],
+  "usage": "inspect root -> plan.planId and plan.jobIds -> reclaim(root,{jobIds,expectedPlanId:plan.planId}); each selected file revalidated under shared maintenance mutex; inspect again after apply for UI.",
+  "tests": {
+    "command": "tsx --test tests/content-storage.test.ts tests/content-jobs.test.ts tests/content-library.test.ts tests/content-derivation.test.ts",
+    "skip": 0,
+    "fail": 0,
+    "storageSpecific": 17,
+    "pass": 45,
+    "log": "logs/storage-review-20261014/targeted-tests.txt"
+  },
+  "typecheck": {
+    "exitCode": 0,
+    "log": "logs/storage-review-20261014/typecheck.txt"
+  },
+  "dryRun": {
+    "reclaimableBytes": 799633498,
+    "appliedByThisConversation": false,
+    "generatedAt": "2026-10-14T03:27:35.313Z",
+    "planId": "4211566db2ef68f17fe918528db706e49b4348754935c1df85a846df710c659f",
+    "log": "logs/storage-review-20261014/dry-run.json",
+    "jobIds": [
+      "053b2cca-5c78-4fc9-91c4-50727310d40b",
+      "25250c93-a83e-4eee-84da-d7d7cd4a0c3e",
+      "3585754e-55e5-46ef-94d3-77c9067b0113",
+      "680066ab-a811-43a9-be9c-3671cffb5b50",
+      "7eccad1a-041a-45c7-af68-19674c59cda3",
+      "843b6ec9-6805-426f-8d70-3b338f38b682",
+      "a48d55e7-99b4-4a3e-ad05-6ea7d06adab2",
+      "a6cd43f8-ee7c-4ca3-8dc6-67834014d167",
+      "b5aa5bdb-5e49-4771-a900-8e58c8d20926",
+      "ce19780f-e912-4853-9937-b2ae6c4b424e",
+      "f96356a9-0fc0-4b12-9b94-2269d9ee6ddc"
+    ],
+    "retainedFiles": 120,
+    "reclaimableFiles": 219,
+    "completedPartialBytes": 204000370,
+    "retainedBytes": 63906362
+  },
+  "inventory": {
+    "beforeLogCleanup": "2026-10-14T03:21:21.315Z",
+    "afterStagingCleanup": null,
+    "afterLogCleanupBeforeStaging": "2026-10-14T03:27:32.931Z",
+    "log": "logs/storage-review-20261014/inventory.json"
+  },
+  "hook": "After runJobs releases worker mutex, select completed/partial entries with reclaimable files, then use this module. Busy, changed plans or cancellation retain remaining copies; do not nest the maintenance lock.",
+  "constraints": [
+    "no actual library deletion by this conversation",
+    "no source edits outside the new storage module and its isolated tests",
+    "formal items/versions/compatibility article library/receipts/backups remain",
+    "only per-file exact capturePath mapping, status saved, bytes and SHA coverage; no basename guessing",
+    "no recursive deletion; empty directory pruning only along successfully reclaimed file parents",
+    "shared worker mutex plus fresh queue/manifest/file checks before each unlink",
+    "no credentials, signed URLs or browser profile content emitted",
+    "no build/full tests/commit/push"
+  ],
+  "report": "docs/reviews/2026-10-14-storage-review.md"
+}

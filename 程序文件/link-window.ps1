@@ -20,7 +20,8 @@ try {
   $startupStage = '读取项目路径'
   $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
   $programRoot = Join-Path $ProjectRoot '程序文件'
-  $configuredContentRoot = [string]$env:CONTENT_LIBRARY_ROOT
+  $configuredContentRoot = ([string]$env:CONTENT_LIBRARY_ROOT).Trim()
+  if ($configuredContentRoot -and (-not [IO.Path]::IsPathRooted($configuredContentRoot) -or $configuredContentRoot -match '^[A-Za-z]:(?![\\/])')) { throw 'CONTENT_LIBRARY_ROOT 必须使用绝对目录，例如 D:\资料库。' }
   $libraryRoot = if ($configuredContentRoot -and [IO.Path]::IsPathRooted($configuredContentRoot)) { [IO.Path]::GetFullPath($configuredContentRoot) } else { Join-Path $ProjectRoot '资料库' }
 } catch {
   $startupMessage = "无法启动多平台资料库（$startupStage）：$($_.Exception.Message)"
@@ -49,6 +50,11 @@ $script:linkReadContentId = ''
 $script:linkSelectedJobId = ''
 $script:linkSelectedContentId = ''
 $script:linkAllJobs = @()
+$script:linkCurrentManifest = $null
+$script:linkTranscriptDraft = $null
+$script:linkStartWorkerAfterRetry = $false
+$script:linkRetryPollAt = [DateTime]::MinValue
+$script:linkRetryRefreshPending = $false
 
 $form = New-Object Windows.Forms.Form
 $form.Text = '多平台资料库'
@@ -99,7 +105,7 @@ function New-LinkTextBox([int]$X, [int]$Y, [int]$Width, [int]$Height, [bool]$Mul
 
 $title = Add-LinkLabel '多平台资料库' 22 16 300 30
 $title.Font = New-Object Drawing.Font('Microsoft YaHei UI', 18, [Drawing.FontStyle]::Bold)
-$hint = Add-LinkLabel '粘贴链接或分享文案后即可保存；任务进度和已保存资料分区显示。' 24 48 1060 24
+$hint = Add-LinkLabel '把链接、文件和文字稿保存到本机；按需处理，随时离线阅读。' 24 48 1060 24
 $hint.ForeColor = [Drawing.Color]::DimGray
 $newTaskLink = New-Object Windows.Forms.LinkLabel
 $newTaskLink.Text = '新建采集 ›'
@@ -148,6 +154,16 @@ $workButton.Anchor = 'Top, Right'
 $inputHint = Add-LinkLabel '粘贴链接后点击“保存链接”；也可仅入队，稍后继续队列。' 12 80 840 20
 $inputHint.Parent = $captureGroup
 $inputHint.ForeColor = [Drawing.Color]::DimGray
+$processingCombo = New-Object Windows.Forms.ComboBox
+$processingCombo.DropDownStyle = 'DropDownList'
+$processingCombo.DisplayMember = 'Text'
+foreach ($mode in @(
+  [pscustomobject]@{Text='原件';Value='original'},
+  [pscustomobject]@{Text='原件 + 文字稿';Value='transcribe'},
+  [pscustomobject]@{Text='再加关键帧 / 图片识别';Value='full'}
+)) { [void]$processingCombo.Items.Add($mode) }
+$processingCombo.SelectedIndex = 1
+$processingCombo.Parent = $captureGroup
 $workButton.BackColor = [Drawing.ColorTranslator]::FromHtml('#1769AA')
 $workButton.ForeColor = [Drawing.Color]::White
 $workButton.FlatAppearance.BorderColor = $workButton.BackColor
@@ -186,6 +202,15 @@ $queueStatus.Parent = $queueGroup
 $queueStatus.Location = New-Object Drawing.Point(876, 106)
 $queueStatus.Anchor = 'Top, Right'
 $queueStatus.ForeColor = [Drawing.Color]::DimGray
+$archiveJobButton = Add-LinkButton '归档记录' 876 108 96
+$archiveJobButton.Parent = $queueGroup
+$archivedJobsButton = Add-LinkButton '已归档' 976 108 96
+$archivedJobsButton.Parent = $queueGroup
+$queueProgress = New-Object Windows.Forms.ProgressBar
+$queueProgress.Style = 'Marquee'
+$queueProgress.MarqueeAnimationSpeed = 35
+$queueProgress.Parent = $queueGroup
+$queueProgress.Visible = $false
 function Set-LinkQueueLayout {
   $innerWidth = [Math]::Max(500, ($queueGroup.ClientSize.Width - 24))
   $sideX = $innerWidth - 196
@@ -194,8 +219,11 @@ function Set-LinkQueueLayout {
   $cancelButton.Location = New-Object Drawing.Point -ArgumentList @([int]$sideX, [int]32)
   $retryButton.Location = New-Object Drawing.Point -ArgumentList @([int]($sideX + 100), [int]32)
   $historyToggle.Location = New-Object Drawing.Point -ArgumentList @([int]$sideX, [int]70)
-  $queueStatus.Location = New-Object Drawing.Point -ArgumentList @([int]$sideX, [int]108)
-  $queueStatus.Size = New-Object Drawing.Size(196, ([Math]::Max(100, $queueGroup.ClientSize.Height - 124)))
+  $archiveJobButton.SetBounds($sideX,108,96,32)
+  $archivedJobsButton.SetBounds(($sideX+100),108,96,32)
+  $queueProgress.SetBounds($sideX,150,196,14)
+  $queueStatus.Location = New-Object Drawing.Point -ArgumentList @([int]$sideX, [int]174)
+  $queueStatus.Size = New-Object Drawing.Size(196, ([Math]::Max(28, $queueGroup.ClientSize.Height - 188)))
 }
 $queueGroup.add_Resize({ Set-LinkQueueLayout })
 
@@ -218,8 +246,13 @@ $platformCombo.Size = New-Object Drawing.Size(128, 28)
 $platformCombo.DropDownStyle = 'DropDownList'
 [void]$platformCombo.Items.Add('全部平台')
 [void]$platformCombo.Items.Add('微信公众号')
+[void]$platformCombo.Items.Add('微信视频号')
 [void]$platformCombo.Items.Add('小红书')
 [void]$platformCombo.Items.Add('B 站')
+[void]$platformCombo.Items.Add('YouTube')
+[void]$platformCombo.Items.Add('抖音')
+[void]$platformCombo.Items.Add('微博')
+[void]$platformCombo.Items.Add('本地文件')
 [void]$platformCombo.Items.Add('普通网页')
 $platformCombo.SelectedIndex = 0
 $platformCombo.Anchor = 'Top, Left'
@@ -240,6 +273,9 @@ $libraryGroup.Controls.Add($libraryList)
 $openReadingButton = Add-LinkButton '打开阅读页' 12 194 100 32
 $openReadingButton.Parent = $libraryGroup
 $openReadingButton.Enabled = $false
+$openReadingButton.BackColor=[Drawing.ColorTranslator]::FromHtml('#1769AA')
+$openReadingButton.ForeColor=[Drawing.Color]::White
+$openReadingButton.FlatAppearance.BorderColor=$openReadingButton.BackColor
 $openPdfButton = Add-LinkButton '打开 PDF' 120 194 88 32
 $openPdfButton.Parent = $libraryGroup
 $openPdfButton.Enabled = $false
@@ -255,6 +291,24 @@ $openSourceButton.Enabled = $false
 $exportButton = Add-LinkButton '导出资料包' 504 194 100 32
 $exportButton.Parent = $libraryGroup
 $exportButton.Enabled = $false
+$importButton = Add-LinkButton '导入本地文件' 620 194 116 32
+$importButton.Parent = $libraryGroup
+$openTranscriptButton = Add-LinkButton '打开文字稿' 12 232 110
+$openTranscriptButton.Parent = $libraryGroup
+$editTranscriptButton = Add-LinkButton '校订文字稿' 130 232 110
+$editTranscriptButton.Parent = $libraryGroup
+$detailsButton = Add-LinkButton '结果详情' 248 232 100
+$detailsButton.Parent = $libraryGroup
+$resolveMissingButton = Add-LinkButton '补充 / 处理缺项' 356 232 128
+$resolveMissingButton.Parent = $libraryGroup
+$organizeButton = Add-LinkButton '标签与收藏' 492 232 110
+$organizeButton.Parent = $libraryGroup
+$zipButton = Add-LinkButton '导出 ZIP' 610 232 100
+$zipButton.Parent = $libraryGroup
+$favoritesOnly = New-Object Windows.Forms.CheckBox
+$favoritesOnly.Text = '只看收藏'
+$favoritesOnly.Parent = $libraryGroup
+$favoritesOnly.AutoSize = $true
 
 $doctorButton = Add-LinkButton '依赖检查' 620 194 88 32
 $doctorButton.Parent = $libraryGroup
@@ -267,7 +321,10 @@ $loginPlatformCombo.DropDownStyle = 'DropDownList'
 $loginPlatformCombo.DisplayMember = 'Text'
 foreach ($platform in @(
   [PSCustomObject]@{ Text = '小红书'; Value = 'xiaohongshu' },
-  [PSCustomObject]@{ Text = 'B 站'; Value = 'bilibili' }
+  [PSCustomObject]@{ Text = 'B 站'; Value = 'bilibili' },
+  [PSCustomObject]@{ Text = '抖音'; Value = 'douyin' },
+  [PSCustomObject]@{ Text = '微博'; Value = 'weibo' },
+  [PSCustomObject]@{ Text = 'YouTube'; Value = 'youtube' }
 )) { [void]$loginPlatformCombo.Items.Add($platform) }
 $loginPlatformCombo.SelectedIndex = 0
 $loginPlatformCombo.Parent = $libraryGroup
@@ -277,7 +334,7 @@ $loginButton.Parent = $libraryGroup
 $toolGroup = New-Object Windows.Forms.GroupBox
 $toolGroup.Text = '遇到提示后再来这里处理'
 $toolGroup.Location = New-Object Drawing.Point(18, 20)
-$toolGroup.Size = New-Object Drawing.Size(650, 166)
+$toolGroup.Size = New-Object Drawing.Size(650, 236)
 $toolsTab.Controls.Add($toolGroup)
 $toolHint = Add-LinkLabel '缺少工具：先“依赖检查”，再按提示安装。需要登录：选择平台，打开专用浏览器登录，回“采集任务”重试。' 16 30 610 40
 $toolHint.Parent = $toolGroup
@@ -287,6 +344,43 @@ $doctorButton.Location = New-Object Drawing.Point(16, 90)
 $installButton.Location = New-Object Drawing.Point(98, 90)
 $loginPlatformCombo.Location = New-Object Drawing.Point(230, 92)
 $loginButton.Location = New-Object Drawing.Point(322, 90)
+$script:linkParserEnabled = $false
+try {
+  $parserSettingsPath = Join-Path $programRoot '.content-settings.json'
+  if (Test-Path -LiteralPath $parserSettingsPath -PathType Leaf) { $parserSettings = Get-Content -LiteralPath $parserSettingsPath -Raw | ConvertFrom-Json; $script:linkParserEnabled = [bool]$parserSettings.wechatChannelsParser.enabled }
+} catch {}
+$parserToggleButton = Add-LinkButton '启用视频号第三方解析' 16 144 192 34
+$parserToggleButton.Parent = $toolGroup
+$youtubeNetworkButton = Add-LinkButton 'YouTube 网络设置' 230 144 192 34
+$youtubeNetworkButton.Name = 'YoutubeNetworkButton'
+$youtubeNetworkButton.Parent = $toolGroup
+if ($script:linkParserEnabled) { $parserToggleButton.Text = '关闭视频号第三方解析' }
+$parserHint = Add-LinkLabel '第三方解析仅发送主动提交的分享链接；服务访问凭证在本机单独配置。' 16 186 610 36
+$parserHint.Parent = $toolGroup
+$parserHint.ForeColor = [Drawing.Color]::DimGray
+
+$storageGroup = New-Object Windows.Forms.GroupBox
+$storageGroup.Text = '存储与工作文件'
+$storageGroup.Location = New-Object Drawing.Point(18, 272)
+$storageGroup.Size = New-Object Drawing.Size(650, 210)
+$toolsTab.Controls.Add($storageGroup)
+$storagePathLabel = Add-LinkLabel ("正式资料：" + $libraryRoot) 16 28 610 26
+$storagePathLabel.Parent = $storageGroup
+$storageInspectButton = Add-LinkButton '检查工作副本' 16 68 148 34
+$storageInspectButton.Parent = $storageGroup
+$storageCleanButton = Add-LinkButton '回收已保存副本' 176 68 160 34
+$storageCleanButton.Parent = $storageGroup
+$storageCleanButton.Enabled = $false
+$logPlanButton = Add-LinkButton '归档历史日志' 348 68 132 34
+$logPlanButton.Parent = $storageGroup
+$logArchivesButton = Add-LinkButton '查看日志归档' 492 68 132 34
+$logArchivesButton.Parent = $storageGroup
+$script:linkLogOptions=$null
+$storageReportLabel = Add-LinkLabel '保存任务结束后会回收已完整入库的工作副本；未完成文件、恢复记录和备份保留。' 16 118 610 70
+$storageReportLabel.Parent = $storageGroup
+$storageReportLabel.ForeColor = [Drawing.Color]::DimGray
+$script:linkStoragePlanId = ''
+$script:linkStorageBytes = 0
 
 function Set-LinkLibraryLayout {
   $innerWidth = [Math]::Max(400, $libraryGroup.ClientSize.Width - 24)
@@ -298,18 +392,24 @@ function Set-LinkLibraryLayout {
   $platformCombo.Location = New-Object Drawing.Point -ArgumentList @([int](135 + $searchWidth), [int]29)
   $searchButton.Location = New-Object Drawing.Point -ArgumentList @([int](271 + $searchWidth), [int]27)
   $allButton.Location = New-Object Drawing.Point -ArgumentList @([int](351 + $searchWidth), [int]27)
-  $actionY = [Math]::Max(140, $libraryGroup.ClientSize.Height - 52)
+  $actionY = [Math]::Max(140, $libraryGroup.ClientSize.Height - 90)
   $libraryList.Location = New-Object Drawing.Point -ArgumentList @([int]12, [int]68)
   $libraryList.Size = New-Object Drawing.Size -ArgumentList @([int]$innerWidth, [int]($actionY - 80))
   $actionX = 12
   foreach ($spec in @(
     @($openReadingButton, 116), @($openPdfButton, 100), @($openVideoButton, 100),
-    @($openFolderButton, 100), @($openSourceButton, 100), @($exportButton, 116)
+    @($openFolderButton, 100), @($openSourceButton, 100), @($exportButton, 116), @($importButton, 124)
   )) {
     $spec[0].Location = New-Object Drawing.Point -ArgumentList @([int]$actionX, [int]$actionY)
     $spec[0].Size = New-Object Drawing.Size -ArgumentList @([int]$spec[1], [int]32)
     $actionX += $spec[1] + 4
   }
+  $actionX=12
+  foreach ($spec in @(@($openTranscriptButton,110),@($editTranscriptButton,110),@($detailsButton,100),@($resolveMissingButton,136),@($organizeButton,110),@($zipButton,100))) {
+    $spec[0].SetBounds($actionX,($actionY+38),$spec[1],32)
+    $actionX += $spec[1]+4
+  }
+  $favoritesOnly.Location=New-Object Drawing.Point(($innerWidth-104),($actionY+44))
 }
 $libraryGroup.add_Resize({ Set-LinkLibraryLayout })
 Set-LinkLibraryLayout
@@ -323,6 +423,9 @@ $status.Anchor = 'Bottom, Left, Right'
 $status.AutoEllipsis = $true
 $tooltip = New-Object Windows.Forms.ToolTip
 $tooltip.SetToolTip($inputBox, '支持多行粘贴。保存链接会立即入队并处理；仅加入队列则暂存。')
+$tooltip.SetToolTip($importButton, '使用采集任务页当前选项导入；原件 + 文字稿会为原图识别文字，完整处理还会抽取视频关键帧。')
+$tooltip.SetToolTip($resolveMissingButton, '使用采集任务页当前选项补充处理，复用已经核验的原件。')
+. (Join-Path $PSScriptRoot 'link-library-dialogs.ps1')
 
 function Set-LinkWorkspaceLayout {
   $mainTabs.SetBounds(24, 86, ($form.ClientSize.Width - 48), ($form.ClientSize.Height - 196))
@@ -332,8 +435,11 @@ function Set-LinkWorkspaceLayout {
   $inputBox.SetBounds(16, 28, ([Math]::Max(240, $captureGroup.Width - 276)), 56)
   $enqueueButton.SetBounds(($captureGroup.Width - 248), 28, 112, 38)
   $workButton.SetBounds(($captureGroup.Width - 128), 28, 112, 38)
-  $inputHint.SetBounds(16, 92, ($captureGroup.Width - 32), 24)
+  $processingCombo.SetBounds(16,90,220,28)
+  $inputHint.SetBounds(248, 94, ($captureGroup.Width - 264), 24)
+  $inputHint.Text='选择需要的产物；旧任务沿用原选项。导入文件也使用此选项。'
   $assetStatusLabel.SetBounds(24, ($form.ClientSize.Height - 96), ($form.ClientSize.Width - 48), 44)
+  $assetStatusLabel.Visible = $mainTabs.SelectedTab -eq $libraryTab
   $status.SetBounds(24, ($form.ClientSize.Height - 46), ($form.ClientSize.Width - 48), 36)
   $newTaskLink.Location = New-Object Drawing.Point(($form.ClientSize.Width - 146), 48)
   $doctorButton.SetBounds(16, 90, 110, 38)
@@ -364,20 +470,37 @@ function Set-LinkControls {
   $enqueueButton.Enabled = -not $busy
   $workButton.Enabled = -not $busy -and -not $workerBusy
   $selectedJob = Get-LinkSelectedJob
-  $canCancel = $selectedJob -and @('queued', 'running', 'paused', 'login_required') -contains [string]$selectedJob.state
-  $canRetry = $selectedJob -and @('failed', 'cancelled', 'partial', 'login_required') -contains [string]$selectedJob.state
-  $cancelButton.Enabled = [bool](($canCancel -and $null -eq $script:linkJob) -or $script:linkInstallJob -or ($script:linkOperation -eq 'login' -and $script:linkJob))
+  $canCancel = $selectedJob -and @('queued', 'running', 'paused', 'waiting', 'rate_limited', 'login_required') -contains [string]$selectedJob.state
+  $canRetry = $selectedJob -and @('failed', 'cancelled', 'partial', 'waiting', 'rate_limited', 'login_required') -contains [string]$selectedJob.state
+  $cancelButton.Enabled = [bool](($canCancel -and $null -eq $script:linkJob) -or $script:linkInstallJob -or ($script:linkOperation -in @('login','import') -and $script:linkJob))
   $retryButton.Enabled = [bool]($canRetry -and -not $busy)
   $selectedItem = Get-LinkSelectedItem
   $selected = $null -ne $selectedItem
   $openReadingButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.readingPath)
   $openPdfButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.pdfPath)
-  $openVideoButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.videoPath)
+  $openVideoButton.Text = if ($selectedItem.videoPath) { '打开视频' } elseif ($selectedItem.audioPath) { '打开音频' } else { '打开视频' }
+  $openVideoButton.Enabled = $selected -and (-not [string]::IsNullOrWhiteSpace([string]$selectedItem.videoPath) -or -not [string]::IsNullOrWhiteSpace([string]$selectedItem.audioPath))
   $openFolderButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.directory)
-  $openSourceButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.sourceUrl)
+  $openSourceButton.Text = if ($selectedItem.platform -eq 'local') { '打开原件' } else { '打开来源' }
+  $openSourceButton.Enabled = $selected -and ([string]$selectedItem.sourceUrl -match '^https?://' -or -not [string]::IsNullOrWhiteSpace([string]$selectedItem.originalPath))
   $exportButton.Enabled = $selected -and -not $busy
+  $openTranscriptButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.transcriptPath)
+  $editTranscriptButton.Enabled = $openTranscriptButton.Enabled -and -not $busy -and -not $workerBusy
+  $detailsButton.Enabled = $selected -and -not $busy
+  $resolveMissingButton.Enabled = $selected -and -not $busy -and -not $workerBusy
+  $organizeButton.Enabled = $selected -and -not $busy
+  $zipButton.Enabled = $selected -and -not $busy
+  $archiveJobButton.Enabled = $selectedJob -and $selectedJob.state -in @('completed','cancelled') -and -not $busy -and -not $workerBusy
+  $archivedJobsButton.Enabled = -not $busy
+  $importButton.Enabled = -not $busy
+  $storageInspectButton.Enabled = -not $busy -and -not $workerBusy
+  $storageCleanButton.Enabled = -not $busy -and -not $workerBusy -and $script:linkStorageBytes -gt 0 -and $script:linkStoragePlanId
+  $logPlanButton.Enabled = -not $busy -and -not $workerBusy
+  $logArchivesButton.Enabled = -not $busy
   $loginButton.Enabled = -not $busy -and -not $workerBusy
   $installButton.Enabled = -not $busy -and -not $workerBusy
+  $parserToggleButton.Enabled = -not $busy -and -not $workerBusy
+  $youtubeNetworkButton.Enabled = -not $busy -and -not $workerBusy
   if ([string]::IsNullOrWhiteSpace($inputBox.Text) -and @($script:linkAllJobs | Where-Object { $_.state -in @('queued','paused') }).Count -gt 0) { $workButton.Text = '继续队列' }
   else { $workButton.Text = '保存链接' }
 }
@@ -409,17 +532,18 @@ function Start-LinkOperation([string[]]$Arguments, [string]$Message) {
     $linkTimer.Start()
   } catch {
     $script:linkJob = $null
-    if ($operation -eq 'enqueue') { $script:linkStartWorkerAfterEnqueue = $false }
+    if ($operation -in @('enqueue','import')) { $script:linkStartWorkerAfterEnqueue = $false }
     $message = '无法启动链接资料库程序：' + $_.Exception.Message
     Set-LinkStatus $message
     Write-LinkError $message
     Set-LinkControls
   }
 }
-function Start-LinkWorker {
+function Start-LinkWorker([bool]$ScheduledOnly = $false) {
   if ($null -ne $script:linkWorkJob -or $null -ne $script:linkJob) { return }
   try {
-    $script:linkWorkJob = Start-LinkCli @('work')
+    $arguments = if ($ScheduledOnly) { @('work','--scheduled') } else { @('work') }
+    $script:linkWorkJob = Start-LinkCli $arguments
     $script:linkWorkRunning = $true
     Set-LinkStatus '正在后台保存队列任务；窗口仍可搜索资料库。'
     Set-LinkControls
@@ -486,8 +610,8 @@ function Complete-LinkInstaller {
     Set-LinkControls
   }
 }
-function Start-LinkPoll {
-  if (-not $script:linkWorkRunning -or $null -ne $script:linkPollJob -or $null -ne $script:linkJob) { return }
+function Start-LinkPoll([switch]$AllowIdle) {
+  if ((-not $script:linkWorkRunning -and -not $AllowIdle) -or $null -ne $script:linkPollJob -or $null -ne $script:linkJob) { return }
   try {
     $script:linkPollJob = Start-LinkCli @('jobs')
     $script:linkLastPoll = [DateTime]::UtcNow
@@ -496,8 +620,13 @@ function Start-LinkPoll {
 function Convert-LinkPlatform([string]$Platform) {
   switch ($Platform) {
     'wechat' { return '微信公众号' }
+    'wechat_channels' { return '微信视频号' }
     'xiaohongshu' { return '小红书' }
     'bilibili' { return 'B 站' }
+    'youtube' { return 'YouTube' }
+    'douyin' { return '抖音' }
+    'weibo' { return '微博' }
+    'local' { return '本地文件' }
     default { return '普通网页' }
   }
 }
@@ -509,11 +638,13 @@ function Convert-LinkState([string]$State) {
     'processing' { '处理中' }
     'tool_missing' { '缺少工具' }
     'queued' { '待处理' }; 'running' { '采集中' }; 'paused' { '已暂停' }; 'completed' { '已保存' }
-    'partial' { '部分保存' }; 'failed' { '失败' }; 'cancelled' { '已取消' }; 'login_required' { '需要登录' }
+    'waiting' { '限流冷却' }; 'rate_limited' { '需手动恢复' }
+    'partial' { '部分保存' }; 'failed' { '失败' }; 'cancelled' { '已取消' }; 'login_required' { '登录 / 验证' }
+    'missing_dependency' { '缺少工具' }; 'skipped' { '未处理' }
     default { $State }
   }
 }
-function Convert-LinkKind([string]$Kind) { switch ($Kind) { 'article' { '文章' } 'video' { '视频' } 'note' { '笔记' } default { '资料' } } }
+function Convert-LinkKind([string]$Kind) { switch ($Kind) { 'article' { '文章' } 'video' { '视频' } 'audio' { '音频' } 'gallery' { '图集' } 'note' { '笔记' } default { '资料' } } }
 function Draw-LinkListRow($Sender, $Event) {
   if ($Event.Index -lt 0) { return }
   $row = $Sender.Items[$Event.Index]
@@ -550,9 +681,17 @@ function Format-LinkJob($Job) {
   $title = if ($Job.title) { [string]$Job.title } else { [string]$Job.input.url }
   $elapsed = ''
   try {
-    $startAt = [DateTime]::Parse([string]$Job.createdAt).ToUniversalTime()
-    $endAt = if ($Job.state -eq 'running') { [DateTime]::UtcNow } else { [DateTime]::Parse([string]$Job.updatedAt).ToUniversalTime() }
-    $elapsed = "耗时 {0}s" -f [Math]::Max(0, [int]($endAt - $startAt).TotalSeconds)
+    if ($Job.state -in @('waiting','rate_limited') -and $Job.retry) {
+      $seconds = [Math]::Max(0,[int]([DateTime]::Parse([string]$Job.retry.notBefore).ToUniversalTime()-[DateTime]::UtcNow).TotalSeconds)
+      $elapsed = if($Job.state -eq 'waiting') { "恢复倒计时 {0}m {1}s" -f [Math]::Floor($seconds/60),($seconds%60) } else { '自动恢复已暂停' }
+    } elseif ($Job.state -eq 'queued') {
+      $queuedAt = if ($Job.queuedAt) { [string]$Job.queuedAt } else { [string]$Job.updatedAt }
+      $elapsed = "等待 {0}s" -f [Math]::Max(0, [int]([DateTime]::UtcNow - [DateTime]::Parse($queuedAt).ToUniversalTime()).TotalSeconds)
+    } elseif ($Job.startedAt) {
+      $startAt = [DateTime]::Parse([string]$Job.startedAt).ToUniversalTime()
+      $endAt = if ($Job.state -eq 'running') { [DateTime]::UtcNow } elseif ($Job.finishedAt) { [DateTime]::Parse([string]$Job.finishedAt).ToUniversalTime() } else { [DateTime]::Parse([string]$Job.updatedAt).ToUniversalTime() }
+      $elapsed = "耗时 {0}s" -f [Math]::Max(0, [int]($endAt - $startAt).TotalSeconds)
+    } else { $elapsed = '耗时未知' }
   } catch { $elapsed = '耗时未知' }
   $compactTitle = if ($title.Length -gt 52) { $title.Substring(0, 51) + '…' } else { $title }
   $view = New-Object LinkWindowListItem
@@ -562,19 +701,27 @@ function Format-LinkJob($Job) {
   return $view
 }
 function Set-LinkQueueDetail($Job) {
+  $queueProgress.Visible = $Job -and $Job.state -eq 'running'
   if ($null -eq $Job) {
     $queueStatus.Text = if ($script:linkShowHistory) { '正在查看全部任务。选择任务可查看完整标题、阶段和说明。' } else { '当前只显示需要处理的任务。选择任务可查看详情。' }
     return
   }
   $title = if ($Job.title) { [string]$Job.title } else { [string]$Job.input.url }
-  $queueStatus.Text = "状态：$(Convert-LinkState $Job.state)`r`n$title`r`n$($Job.stage) · $($Job.message)"
+  $phaseCount = ''
+  if ($Job.state -eq 'running' -and $Job.progress -and $null -ne $Job.progress.completed -and $null -ne $Job.progress.total -and [double]$Job.progress.total -gt 0 -and [double]$Job.progress.completed -ge 0 -and [double]$Job.progress.completed -le [double]$Job.progress.total) {
+    $queueProgress.Style='Continuous'; $queueProgress.Value=[Math]::Min(100,[Math]::Max(0,[int](100*[double]$Job.progress.completed/[double]$Job.progress.total)))
+    $phaseCount="`r`n$($Job.progress.phase)：$($Job.progress.completed) / $($Job.progress.total) $($Job.progress.unit)"
+  } else {$queueProgress.Style='Marquee'}
+  $mode = switch ([string]$Job.input.processing) { 'original' {'原件'} 'transcribe' {'原件 + 文字稿'} default {'完整处理'} }
+  $retryDetail = if($Job.retry) { "`r`n恢复时间：$([DateTime]::Parse([string]$Job.retry.notBefore).ToLocalTime().ToString('MM-dd HH:mm:ss')) · 自动恢复 $([Math]::Min(3,[int]$Job.retry.attempts))/3" } else { '' }
+  $queueStatus.Text = "状态：$(Convert-LinkState $Job.state)`r`n$title`r`n$($Job.stage) · $($Job.message)$phaseCount$retryDetail`r`n选项：$mode"
   $tooltip.SetToolTip($queueStatus, $queueStatus.Text)
 }
 function Render-LinkJobs($Jobs) {
   $script:linkAllJobs = @($Jobs)
   $keep = $script:linkSelectedJobId
   $visibleJobs = @($Jobs | Where-Object {
-    $script:linkShowHistory -or @('queued', 'running', 'paused', 'login_required') -contains [string]$_.state
+    $script:linkShowHistory -or @('queued', 'running', 'paused', 'waiting', 'rate_limited', 'login_required') -contains [string]$_.state
   } | Sort-Object @{ Expression = { try { [DateTime]::Parse([string]$_.createdAt) } catch { [DateTime]::MinValue } }; Descending = $true })
   $queueList.BeginUpdate()
   try {
@@ -593,30 +740,56 @@ function Render-LinkJobs($Jobs) {
   } else { Set-LinkQueueDetail $null }
   $historyToggle.Text = if ($script:linkShowHistory) { '只看当前任务' } else { '查看历史' }
   Set-LinkControls
+  if (@(Get-LinkAutomaticWaitJobs).Count -gt 0) { $linkTimer.Start() }
+}
+function Get-LinkAutomaticWaitJobs {
+  return @($script:linkAllJobs | Where-Object {
+    $_.state -eq 'waiting' -and -not $_.cancelRequested -and $_.retry -and $_.retry.kind -eq 'youtube_rate_limit' -and $_.retry.automatic -eq $true
+  })
+}
+function Test-LinkRetryDue([DateTime]$Now = [DateTime]::UtcNow) {
+  foreach ($job in @(Get-LinkAutomaticWaitJobs)) {
+    try { if ([DateTime]::Parse([string]$job.retry.notBefore).ToUniversalTime() -le $Now) { return $true } } catch { }
+  }
+  return $false
+}
+function Invoke-LinkRetryScheduler([DateTime]$Now = [DateTime]::UtcNow) {
+  if (@(Get-LinkAutomaticWaitJobs).Count -eq 0 -or $script:linkJob -or $script:linkWorkJob -or $script:linkPollJob -or $script:linkInstallJob) { return }
+  if ($Now -lt $script:linkRetryPollAt) { return }
+  # Refresh persisted cancellation/deadline changes before deciding to wake a worker.
+  $script:linkRetryPollAt = $Now.AddSeconds(5)
+  $script:linkRetryRefreshPending = $true
+  Start-LinkPoll -AllowIdle
 }
 function Render-LinkAssets($Item) {
-  if ($null -eq $Item) { $assetStatusLabel.Text = '产物状态：选择资料后显示逐项结果。'; return }
+  $script:linkCurrentManifest = $null
+  if ($null -eq $Item) { $assetStatusLabel.Text = '选择资料后可查看结果详情、打开文字稿，或补充处理。'; return }
   $parts = @($(if ($Item.readingPath) { '阅读页可用' }), $(if ($Item.pdfPath) { 'PDF 可用' }), $(if ($Item.videoPath) { '视频可用' })) | Where-Object { $_ }
-  $assetStatusLabel.Text = "$($Item.title)`r`n$(Convert-LinkState $Item.status) · $($parts -join ' / ')"
+  $displayTitle = if ($Item.displayTitle) { [string]$Item.displayTitle } else { [string]$Item.title }
+  $assetStatusLabel.Text = "$displayTitle`r`n$(Convert-LinkState $Item.status) · $($parts -join ' / ')"
   $tooltip.SetToolTip($assetStatusLabel, $assetStatusLabel.Text)
 }
 function Render-LinkManifest($Manifest) {
   if ($null -eq $Manifest) { return }
+  $script:linkCurrentManifest = $Manifest
   $assets = @($Manifest.assets)
   if ($assets.Count -eq 0) { return }
   $parts = @($assets | ForEach-Object {
     $label = if ($_.label) { [string]$_.label } else { [string]$_.role }
     $roleNames = @{reading='阅读页';pdf='PDF';video='视频';image='图片';audio='音频';subtitle='字幕';transcript='转写';ocr='文字识别';source='来源'}
     if ($roleNames.ContainsKey($label)) { $label = $roleNames[$label] }
-    "$label：$(Convert-LinkState $_.status)"
+    "$label：$(Convert-LinkState $_.status)$(if ($_.status -ne 'saved' -and $_.reason) {'（'+[string]$_.reason+'）'})"
   })
-  $assetStatusLabel.Text = '产物状态：' + ($parts -join '；')
+  $savedCount=@($assets | Where-Object {$_.status -eq 'saved'}).Count
+  $missingCount=$assets.Count-$savedCount
+  $assetStatusLabel.Text = "已保存 $savedCount 项$(if($missingCount){'，另有 '+$missingCount+' 项未就绪；点击结果详情查看原因和操作。'})`r`n" + ($parts -join '；')
   $tooltip.SetToolTip($assetStatusLabel, $assetStatusLabel.Text)
 }
 function Get-LinkFilteredItems($Items) {
+  if ($favoritesOnly.Checked) { $Items = @($Items | Where-Object {$_.favorite}) }
   $platform = [string]$platformCombo.SelectedItem
   if ($platform -eq '全部平台' -or [string]::IsNullOrWhiteSpace($platform)) { return @($Items) }
-  $wanted = switch ($platform) { '微信公众号' { 'wechat' } '小红书' { 'xiaohongshu' } 'B 站' { 'bilibili' } default { 'web' } }
+  $wanted = switch ($platform) { '微信公众号' { 'wechat' } '微信视频号' { 'wechat_channels' } '小红书' { 'xiaohongshu' } 'B 站' { 'bilibili' } 'YouTube' { 'youtube' } '抖音' { 'douyin' } '微博' { 'weibo' } '本地文件' { 'local' } default { 'web' } }
   return @($Items | Where-Object { [string]$_.platform -eq $wanted })
 }
 function Render-LinkLibrary($Items) {
@@ -628,7 +801,8 @@ function Render-LinkLibrary($Items) {
     foreach ($item in @($filtered)) {
       $date = [string]$item.capturedAt
       if ($date.Length -ge 10) { $date = $date.Substring(0, 10) }
-      $text = "[$date] $($item.title)  ·  $(Convert-LinkPlatform $item.platform)  ·  $(Convert-LinkKind $item.kind)  ·  $(Convert-LinkState $item.status)"
+      $displayTitle = if ($item.displayTitle) { [string]$item.displayTitle } else { [string]$item.title }
+      $text = "$(if($item.favorite){'★ '})[$date] $displayTitle  ·  $(Convert-LinkPlatform $item.platform)  ·  $(Convert-LinkKind $item.kind)  ·  $(Convert-LinkState $item.status)$(if(@($item.tags).Count){' · '+(@($item.tags)-join ' / ')})"
       $view = New-Object LinkWindowListItem
       $view.Text = $text
       $view.ContentId = [string]$item.contentId
@@ -660,6 +834,26 @@ function Refresh-LinkLibrary {
 }
 function Complete-LinkOperation($Payload, [string]$Operation) {
   if ($null -eq $Payload) { return }
+  if ($Operation -eq 'details') {if($Payload.ok) {Show-LinkResultDialog $Payload} else {Set-LinkStatus ([string]$Payload.message)}; return}
+  if ($Operation -eq 'transcript-read') {if($Payload.ok) {Show-LinkTranscriptEditor $Payload} else {Set-LinkStatus ([string]$Payload.message)}; return}
+  if ($Operation -eq 'transcript-save') {
+    if($Payload.ok) {
+      if($script:linkTranscriptDraft -and (Test-Path -LiteralPath $script:linkTranscriptDraft -PathType Leaf)) {Remove-Item -LiteralPath $script:linkTranscriptDraft}
+      $script:linkTranscriptDraft=$null
+      Set-LinkStatus ([string]$Payload.message); Refresh-LinkLibrary
+    } else {Set-LinkStatus ([string]$Payload.message + '；校订草稿保留在 ' + [string]$script:linkTranscriptDraft)}
+    return
+  }
+  if($Operation -eq 'organize') {Set-LinkStatus ([string]$Payload.message);if($Payload.ok){Refresh-LinkLibrary};return}
+  if($Operation -eq 'history') {if($Payload.ok){Show-LinkHistoryDialog $Payload}else{Set-LinkStatus ([string]$Payload.message)};return}
+  if($Operation -in @('archive-jobs','restore-jobs')) {Set-LinkStatus ([string]$Payload.message);if($Payload.ok){Refresh-LinkJobs};return}
+  if($Operation -eq 'logs') {
+    if(-not $Payload.ok){Set-LinkStatus ([string]$Payload.message);return}
+    if($Payload.plan){Show-LinkLogPlanDialog $Payload.plan}
+    elseif($Payload.PSObject.Properties.Name -contains 'archives'){Show-LinkLogArchivesDialog $Payload.archives}
+    else{Set-LinkStatus ([string]$Payload.message + $(if($Payload.archive.zipPath){' · '+[string]$Payload.archive.zipPath}))}
+    return
+  }
   if ($Operation -eq 'list') {
     if ($Payload.ok) { Render-LinkLibrary $Payload.items }
     else { Set-LinkStatus ('资料库读取失败：' + $Payload.message); Write-LinkError $Payload.message }
@@ -681,29 +875,49 @@ function Complete-LinkOperation($Payload, [string]$Operation) {
     } else { Set-LinkStatus ('依赖检查失败：' + $Payload.message) }
     return
   }
-  if ($Operation -eq 'enqueue' -or $Operation -eq 'cancel' -or $Operation -eq 'retry') {
+  if ($Operation -eq 'storage') {
+    $script:linkStoragePlanId = if ($Payload.ok -and $Payload.plan) { [string]$Payload.plan.planId } else { '' }
+    $script:linkStorageBytes = if ($Payload.ok -and $Payload.plan) { [long]$Payload.plan.reclaimableBytes } else { 0 }
+    $storageReportLabel.Text = [string]$Payload.message
+    Set-LinkStatus ([string]$Payload.message)
+    Set-LinkControls
+    return
+  }
+  if ($Operation -eq 'enqueue' -or $Operation -eq 'import' -or $Operation -eq 'cancel' -or $Operation -eq 'retry') {
     if ($Payload.ok) {
+      if ($Operation -in @('enqueue','import') -and $Payload.focusJobId) { $script:linkSelectedJobId = [string]$Payload.focusJobId }
       Render-LinkJobs $Payload.jobs
       Set-LinkStatus ([string]$Payload.message)
       if ($Operation -eq 'enqueue') { $inputBox.Clear() }
-      if ($Operation -eq 'enqueue' -and $script:linkStartWorkerAfterEnqueue) {
+      if ($Operation -in @('enqueue','import') -and $script:linkStartWorkerAfterEnqueue) {
         $script:linkStartWorkerAfterEnqueue = $false
-        Start-LinkWorker
+        $readyCount = @($Payload.jobs | Where-Object { $_.state -in @('queued','paused') -and -not $_.cancelRequested }).Count
+        if ($readyCount -gt 0) { Start-LinkWorker }
       }
+      if($Operation -eq 'retry' -and $script:linkStartWorkerAfterRetry) {$script:linkStartWorkerAfterRetry=$false;Start-LinkWorker}
     } else {
-      if ($Operation -eq 'enqueue') { $script:linkStartWorkerAfterEnqueue = $false }
+      if ($Operation -in @('enqueue','import')) { $script:linkStartWorkerAfterEnqueue = $false }
+      if ($Operation -eq 'retry') {$script:linkStartWorkerAfterRetry=$false}
       Set-LinkStatus ('任务操作失败：' + $Payload.message); Write-LinkError $Payload.message
     }
     return
   }
   if ($Operation -eq 'read') {
-    if ($Payload.ok -and $script:linkSelectedContentId -eq $script:linkReadContentId) { Render-LinkManifest $Payload.manifest; Set-LinkStatus ([string]$Payload.message) }
+    if ($Payload.ok -and $script:linkSelectedContentId -eq $script:linkReadContentId) { Render-LinkManifest $Payload.manifest; Set-LinkStatus '资料已就绪；可打开阅读页、文字稿或查看结果详情。' }
     elseif ($Payload.ok -and $script:linkSelectedContentId) { Start-LinkOperation @('read', $script:linkSelectedContentId) '正在读取产物状态…' }
     else { Set-LinkStatus ('产物状态读取失败：' + $Payload.message); Write-LinkError $Payload.message }
     return
   }
-  if ($Operation -eq 'export' -or $Operation -eq 'login') {
-    if ($Payload.ok) { Set-LinkStatus ([string]$Payload.message) }
+  if ($Operation -eq 'video-parser') {
+    if ($Payload.ok) {
+      $script:linkParserEnabled = [bool]$Payload.enabled
+      $parserToggleButton.Text = if ($script:linkParserEnabled) { '关闭视频号第三方解析' } else { '启用视频号第三方解析' }
+      Set-LinkStatus ([string]$Payload.message)
+    } else { Set-LinkStatus ('解析设置失败：' + $Payload.message); Write-LinkError $Payload.message }
+    return
+  }
+  if ($Operation -in @('export','export-zip','login')) {
+    if ($Payload.ok) { Set-LinkStatus ([string]$Payload.message + $(if($Payload.path){' · '+[string]$Payload.path}elseif($Payload.directory){' · '+[string]$Payload.directory})) }
     else { Set-LinkStatus ('操作失败：' + $Payload.message); Write-LinkError $Payload.message }
     return
   }
@@ -720,6 +934,10 @@ function Complete-LinkWorker($Payload) {
 }
 function Complete-LinkPoll($Payload) {
   if ($Payload -and $Payload.ok) { Render-LinkJobs $Payload.jobs }
+  if ($script:linkRetryRefreshPending) {
+    $script:linkRetryRefreshPending = $false
+    if ($Payload -and $Payload.ok -and (Test-LinkRetryDue) -and -not $script:linkJob -and -not $script:linkWorkJob -and -not $script:linkInstallJob) { Start-LinkWorker $true }
+  }
 }
 
 $linkTimer = New-Object Windows.Forms.Timer
@@ -750,7 +968,8 @@ $linkTimer.add_Tick({
       Refresh-LinkJobs
       $script:linkPendingLibraryRefresh = $true
     }
-    if ($null -eq $script:linkJob -and $null -eq $script:linkWorkJob -and $null -eq $script:linkPollJob -and $null -eq $script:linkInstallJob) { $linkTimer.Stop() }
+    Invoke-LinkRetryScheduler
+    if ($null -eq $script:linkJob -and $null -eq $script:linkWorkJob -and $null -eq $script:linkPollJob -and $null -eq $script:linkInstallJob -and @(Get-LinkAutomaticWaitJobs).Count -eq 0) { $linkTimer.Stop() }
   } catch {
     Set-LinkStatus ('窗口刷新失败：' + $_.Exception.Message)
     Write-LinkError $_.Exception.Message
@@ -759,6 +978,7 @@ $linkTimer.add_Tick({
 
 function Get-LinkSelectedJob { if ($queueList.SelectedItem) { return $queueList.SelectedItem.Job }; return $null }
 function Get-LinkSelectedItem { if ($libraryList.SelectedItem) { return $libraryList.SelectedItem.Item }; return $null }
+function Get-LinkProcessingChoice { return [string]$processingCombo.SelectedItem.Value }
 function Invoke-LinkOpen([string]$Kind) {
   $item = Get-LinkSelectedItem
   if ($null -eq $item) { return }
@@ -768,8 +988,8 @@ function Invoke-LinkOpen([string]$Kind) {
     $rootPrefix = [IO.Path]::GetFullPath($libraryRoot).TrimEnd('\') + '\'
     if (-not $directory.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '资料目录不在当前资料库内。' }
     if ($Kind -eq 'folder') { Start-Process explorer.exe -ArgumentList (ConvertTo-ReaderArgument $directory); return }
-    if ($Kind -eq 'source') { Start-Process ([string]$item.sourceUrl); return }
-    $relative = switch ($Kind) { 'reading' { [string]$item.readingPath } 'pdf' { [string]$item.pdfPath } default { [string]$item.videoPath } }
+    if ($Kind -eq 'source' -and $item.platform -ne 'local') { Start-Process ([string]$item.sourceUrl); return }
+    $relative = switch ($Kind) { 'reading' { [string]$item.readingPath } 'pdf' { [string]$item.pdfPath } 'transcript' { [string]$item.transcriptPath } 'source' { [string]$item.originalPath } default { if ($item.videoPath) { [string]$item.videoPath } else { [string]$item.audioPath } } }
     if ([string]::IsNullOrWhiteSpace($relative)) { throw '该资料没有对应产物，可能尚未生成或不可用。' }
     $candidate = if ([IO.Path]::IsPathRooted($relative)) { [IO.Path]::GetFullPath($relative) } else { [IO.Path]::GetFullPath((Join-Path $directory $relative)) }
     if (-not $candidate.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and -not $candidate.StartsWith($directory.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw '产物路径不在资料目录内。' }
@@ -780,7 +1000,7 @@ function Invoke-LinkOpen([string]$Kind) {
 
 $enqueueButton.add_Click({
   if ([string]::IsNullOrWhiteSpace($inputBox.Text)) { Set-LinkStatus '请先粘贴链接或完整分享文案。'; return }
-  Start-LinkOperation @('enqueue', $inputBox.Text) '正在加入持久队列…'
+  Start-LinkOperation @('enqueue', '--processing', (Get-LinkProcessingChoice), $inputBox.Text) '正在加入持久队列…'
 })
 $inputBox.add_TextChanged({ Set-LinkControls })
 $newTaskLink.add_Click({ $mainTabs.SelectedTab = $taskTab; $inputBox.Focus() })
@@ -790,7 +1010,7 @@ $workButton.add_Click({
     Set-LinkStatus '请先粘贴链接或完整分享文案。'; return
   }
   $script:linkStartWorkerAfterEnqueue = $true
-  Start-LinkOperation @('enqueue', $inputBox.Text) '正在加入队列并开始保存…'
+  Start-LinkOperation @('enqueue', '--processing', (Get-LinkProcessingChoice), $inputBox.Text) '正在加入队列并开始保存…'
 })
 $cancelButton.add_Click({
   try {
@@ -805,6 +1025,15 @@ $cancelButton.add_Click({
       Stop-Process -Id $script:linkInstallJob.Process.Id -Force -ErrorAction SilentlyContinue
       $script:linkInstallJob = $null
       Set-LinkStatus '依赖安装已取消。'
+      Set-LinkControls
+      return
+    }
+    if ($script:linkOperation -eq 'import' -and $script:linkJob) {
+      Stop-ReaderProcess $script:linkJob
+      $script:linkJob = $null
+      $script:linkStartWorkerAfterEnqueue = $false
+      Set-LinkStatus '已停止文件检查；如有任务已入队，可从列表继续。'
+      Refresh-LinkJobs
       Set-LinkControls
       return
     }
@@ -830,9 +1059,13 @@ $cancelButton.add_Click({
     }
   } catch { Set-LinkStatus ('取消失败：' + $_.Exception.Message); Write-LinkError $_.Exception.Message }
 })
-$retryButton.add_Click({ $job = Get-LinkSelectedJob; if ($job) { Start-LinkOperation @('retry', $job.id) '正在重试任务…' } })
+$retryButton.add_Click({ $job = Get-LinkSelectedJob; if ($job) { Start-LinkOperation @('retry', $job.id) '正在沿用原处理选项重试任务…' } })
 $searchButton.add_Click({ Refresh-LinkLibrary })
-$allButton.add_Click({ $searchBox.Clear(); $platformCombo.SelectedIndex = 0; Refresh-LinkLibrary })
+$parserToggleButton.add_Click({ $parserAction = if ($script:linkParserEnabled) { 'off' } else { 'on' }; Start-LinkOperation @('video-parser', $parserAction) '正在更新本机视频号解析设置…' })
+$allButton.add_Click({ $searchBox.Clear(); $platformCombo.SelectedIndex = 0; $favoritesOnly.Checked=$false; Refresh-LinkLibrary })
+$favoritesOnly.add_CheckedChanged({if($form.IsHandleCreated){Refresh-LinkLibrary}})
+$archiveJobButton.add_Click({$job=Get-LinkSelectedJob;if($job){Start-LinkOperation @('archive-jobs',[string]$job.id) '正在归档已结束任务；资料文件保留…'}})
+$archivedJobsButton.add_Click({Start-LinkOperation @('history') '正在读取可恢复的任务历史…'})
 $searchBox.add_KeyDown({ if ($_.KeyCode -eq [Windows.Forms.Keys]::Enter) { $_.SuppressKeyPress = $true; Refresh-LinkLibrary } })
 $platformCombo.add_SelectedIndexChanged({ if ($form.IsHandleCreated) { Refresh-LinkLibrary } })
 $queueList.add_SelectedIndexChanged({
@@ -857,12 +1090,76 @@ $libraryList.add_SelectedIndexChanged({
 $libraryList.add_DoubleClick({ Invoke-LinkOpen 'reading' })
 $openReadingButton.add_Click({ Invoke-LinkOpen 'reading' })
 $openPdfButton.add_Click({ Invoke-LinkOpen 'pdf' })
+$openTranscriptButton.add_Click({Invoke-LinkOpen 'transcript'})
+$editTranscriptButton.add_Click({$item=Get-LinkSelectedItem;if($item){Start-LinkOperation @('transcript-read',[string]$item.contentId) '正在读取文字稿与校订版本…'}})
+$detailsButton.add_Click({$item=Get-LinkSelectedItem;if($item){Start-LinkOperation @('details',[string]$item.contentId) '正在读取逐项保存结果…'}})
+$organizeButton.add_Click({$item=Get-LinkSelectedItem;if($item){Show-LinkTagEditor $item}})
+$zipButton.add_Click({$item=Get-LinkSelectedItem;if($item){Start-LinkOperation @('export-zip',[string]$item.contentId) '正在打包并核验 ZIP…'}})
+$resolveMissingButton.add_Click({
+  $item=Get-LinkSelectedItem
+  if(-not $item){return}
+  $selectedMode=Get-LinkProcessingChoice
+  $requiredIssues=@($script:linkCurrentManifest.assets | Where-Object {
+    if($_.status -notin @('login_required','missing_dependency') -and [string]$_.reason -notmatch 'HTTP\s*429|请求过于频繁'){return $false}
+    if($selectedMode -eq 'full' -or $_.provenance -eq 'original'){return $true}
+    if($_.role -eq 'frame' -or ($_.role -eq 'ocr' -and ($selectedMode -eq 'original' -or $script:linkCurrentManifest.kind -eq 'video'))){return $false}
+    if($selectedMode -eq 'original' -and ($_.role -eq 'transcript' -or $_.provenance -in @('machine_asr','machine_ocr','platform_subtitle') -or ($_.role -eq 'audio' -and $_.provenance -eq 'generated'))){return $false}
+    return $true
+  })
+  if($script:linkCurrentManifest -and $requiredIssues.Count -gt 0) {
+    $mainTabs.SelectedTab=$toolsTab
+    foreach($entry in $loginPlatformCombo.Items) {if($entry.Value -eq $item.platform){$loginPlatformCombo.SelectedItem=$entry}}
+    Set-LinkStatus '按结果详情处理：限流时先停止连续重试，稍后再试；检查网络设置或完成专用平台验证后回采集任务重试。'; return
+  }
+  $job=@($script:linkAllJobs | Where-Object {$_.contentId -eq $item.contentId}) | Select-Object -First 1
+  if($job){$script:linkStartWorkerAfterRetry=$true;Start-LinkOperation @('retry','--processing',(Get-LinkProcessingChoice),[string]$job.id) '正在按当前处理选项补充资料…';$mainTabs.SelectedTab=$taskTab}
+  else{$mainTabs.SelectedTab=$taskTab;if($item.sourceUrl -match '^https?://'){$inputBox.Text=[string]$item.sourceUrl};Set-LinkStatus '选择需要的处理选项后保存；本地原件请从导入文件继续。'}
+})
 $openVideoButton.add_Click({ Invoke-LinkOpen 'video' })
 $openFolderButton.add_Click({ Invoke-LinkOpen 'folder' })
 $openSourceButton.add_Click({ Invoke-LinkOpen 'source' })
 $exportButton.add_Click({ $item = Get-LinkSelectedItem; if ($item) { Start-LinkOperation @('export', [string]$item.contentId) '正在导出资料包…' } })
+$importButton.add_Click({
+  $dialog = New-Object Windows.Forms.OpenFileDialog
+  $dialog.Title = '选择要复制到资料库的本地文件'
+  $dialog.Multiselect = $true
+  $dialog.Filter = '支持的文件|*.txt;*.md;*.markdown;*.html;*.htm;*.pdf;*.docx;*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.mp4;*.webm;*.mkv;*.mov;*.m4a;*.mp3;*.wav;*.aac;*.flac;*.ogg|所有文件|*.*'
+  try {
+    if ($dialog.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK) {
+      $script:linkStartWorkerAfterEnqueue = $true
+      $importMode = Get-LinkProcessingChoice
+      Start-LinkOperation (@('import','--processing',$importMode) + $dialog.FileNames) '正在检查本地文件并加入队列…'
+    }
+  } finally { $dialog.Dispose() }
+})
+$storageInspectButton.add_Click({ Start-LinkOperation @('storage') '正在核对工作文件与正式资料…' })
+$storageCleanButton.add_Click({ if ($script:linkStoragePlanId) { Start-LinkOperation @('storage', '--apply', $script:linkStoragePlanId) '正在重新核验并回收已保存副本…' } })
+$logPlanButton.add_Click({
+  $dialog=New-Object Windows.Forms.FolderBrowserDialog
+  $dialog.Description='选择已停止写入的历史日志顶层目录。核验后创建可恢复 ZIP，原目录保留。'
+  $dialog.SelectedPath=Join-Path $programRoot 'logs'
+  try{if($dialog.ShowDialog($form) -eq 'OK'){
+    $selected=[IO.Path]::GetFullPath($dialog.SelectedPath)
+    $logs=[IO.Path]::GetFullPath((Join-Path $programRoot 'logs'))
+    if([IO.Path]::GetDirectoryName($selected) -ne $logs){Set-LinkStatus '请选择当前程序 logs 内的一个历史顶层目录。';return}
+    $relative='logs/'+[IO.Path]::GetFileName($selected)
+    $script:linkLogOptions=@{directories=@($relative);closedDirectories=@($relative)}
+    Start-LinkOperation @('logs','plan',($script:linkLogOptions|ConvertTo-Json -Compress)) '正在核对封闭日志和可恢复归档…'
+  }}finally{$dialog.Dispose()}
+})
+$logArchivesButton.add_Click({Start-LinkOperation @('logs','list') '正在读取日志归档…'})
 $doctorButton.add_Click({ Start-LinkOperation @('doctor') '正在检查本地依赖…' })
 $installButton.add_Click({ Start-LinkInstaller })
+$youtubeNetworkButton.add_Click({
+  $setting = $null
+  try {if(Test-Path -LiteralPath (Join-Path $programRoot '.content-settings.json') -PathType Leaf) {$setting = (Get-Content -LiteralPath (Join-Path $programRoot '.content-settings.json') -Raw | ConvertFrom-Json).youtubeNetwork}} catch {}
+  $choice = Show-LinkYoutubeNetworkDialog $setting
+  if($choice) {
+    $arguments = @('youtube-network',[string]$choice.Mode)
+    if($choice.Mode -eq 'proxy') {$arguments += [string]$choice.ProxyUrl}
+    Start-LinkOperation $arguments '正在保存 YouTube 网络设置…'
+  }
+})
 $loginButton.add_Click({ Start-LinkOperation @('login', [string]$loginPlatformCombo.SelectedItem.Value) '正在打开专用浏览器登录入口…' })
 $form.add_FormClosing({
   try {

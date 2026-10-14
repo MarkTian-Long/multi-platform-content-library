@@ -7,6 +7,16 @@
 程序文件/tools/
 程序文件/.venv-content/
 程序文件/.content-profile/
+程序文件/.content-settings.json
+程序文件/.content-parser-auth.json
 程序文件/.content-browser/
 程序文件/.content-login/
 程序文件/scripts/__pycache__/
+/版本备份/
+/程序文件/.log-archives/
+/程序文件/.organization/
+.env
+.env.*
+**/cookies.txt
+**/__pycache__/
+**/*.pyc

@@ -3,11 +3,50 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promises as dns } from "node:dns";
 import { acquireContent, extractXiaohongshuNoteHtml, writeComments } from "../src/content-acquisition.js";
 import { parseContentLinks } from "../src/content-input.js";
 import { persistBilibiliCookies } from "../src/content-network.js";
+import { contentStatus } from "../src/content-library.js";
+import { chromium } from "playwright-core";
 
 const fixture = await fs.readFile(new URL("./fixtures/content-web.html", import.meta.url), "utf8");
+
+test("Xiaohongshu short shares acquire a stable note identity and require an actual video stream", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "content-acquisition-xhs-video-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  t.mock.method(globalThis,"fetch",async () => new Response(Uint8Array.of(1,2,3),{headers:{"content-type":"video/mp4"}}));
+  const snapshot = { finalUrl:"https://www.xiaohongshu.com/explore/123456789012345678901234",title:"实际笔记",body:"简介",images:[],videos:["https://example.com/video.mp4"] };
+  const source = parseContentLinks("https://xhslink.cn/o/example")[0];
+  const valid = await acquireContent(source,{runtimeRoot:directory,directory},{captureXiaohongshu:async()=>snapshot,probeMedia:async()=>({video:true,audio:true})});
+  assert.equal(valid.nativeId,"123456789012345678901234");assert.equal(valid.kind,"video");assert.equal(valid.assets[0].status,"saved");
+  const invalid = await acquireContent(source,{runtimeRoot:directory,directory},{captureXiaohongshu:async()=>snapshot,probeMedia:async()=>({video:false,audio:false})});
+  assert.equal(invalid.assets[0].status,"unavailable");assert.match(invalid.assets[0].reason??"",/视频流/);
+});
+
+test("a known Xiaohongshu video with no downloadable stream remains an explicit video failure", async t => {
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),"content-acquisition-xhs-missing-video-"));t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  t.mock.method(dns,"lookup",async()=>[{address:"93.184.216.34",family:4}]);
+  t.mock.method(globalThis,"fetch",async()=>new Response(Uint8Array.of(1),{headers:{"content-type":"image/jpeg"}}));
+  const url="https://www.xiaohongshu.com/explore/123456789012345678901234";
+  const snapshot=extractXiaohongshuNoteHtml('<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"123456789012345678901234":{"note":{"type":"video","title":"视频笔记","desc":"简介","imageList":[{"urlDefault":"https://example.com/cover.jpg"}],"video":{"src":"blob:unavailable"}}}}}};</script>',url);
+  const record=await acquireContent(parseContentLinks(url)[0],{runtimeRoot:directory,directory},{captureXiaohongshu:async()=>snapshot});
+  assert.equal(record.kind,"video");
+  assert.ok(record.assets.some(asset=>asset.role==="video"&&asset.status==="unavailable"));
+  assert.equal(contentStatus(record),"partial");
+});
+
+test("Xiaohongshu browser fallback retains the public page's confirmed video identity", async t => {
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),"content-acquisition-xhs-fallback-"));t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  t.mock.method(dns,"lookup",async()=>[{address:"93.184.216.34",family:4}]);
+  const url="https://www.xiaohongshu.com/explore/123456789012345678901234";
+  t.mock.method(globalThis,"fetch",async()=>new Response('<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"123456789012345678901234":{"note":{"type":"video","title":"视频","desc":"简介","video":{"src":"blob:missing"}}}}}};</script>'));
+  const page={goto:async()=>{},waitForFunction:async()=>{},url:()=>url,content:async()=>'<section id="noteContainer"><h1>视频</h1><div class="note-content">简介</div></section>',locator:()=>({innerText:async()=>"简介"})};
+  t.mock.method(chromium,"launchPersistentContext",async()=>({pages:()=>[page],route:async()=>{},close:async()=>{}}) as never);
+  const record=await acquireContent(parseContentLinks(url)[0],{runtimeRoot:directory,directory});
+  assert.equal(record.kind,"video");assert.ok(record.assets.some(asset=>asset.role==="video"&&asset.status==="unavailable"));
+});
 
 test("captures a public webpage as cleaned markdown and saves public images relative to its content directory", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "content-acquisition-"));

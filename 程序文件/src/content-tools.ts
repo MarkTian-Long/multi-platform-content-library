@@ -120,27 +120,39 @@ async function firstLocal(runtimeRoot: string, names: string[], configured?: str
   return undefined;
 }
 
-async function probeExecutable(id: string, name: string, runtimeRoot: string, envKey?: string): Promise<ToolAvailability> {
+async function probeExecutable(id: string, name: string, runtimeRoot: string, envKey?: string,signal?:AbortSignal): Promise<ToolAvailability> {
   const local = await firstLocal(runtimeRoot, [name], envKey ? process.env[envKey] : undefined);
   const command = local ?? name;
-  const result = await runContentTool({ command, args: name === "ffmpeg" || name === "ffprobe" ? ["-version"] : ["--version"], timeoutMs: 5_000, maxOutputBytes: 4_096 });
+  const result = await runContentTool({ command, args: name === "ffmpeg" || name === "ffprobe" ? ["-version"] : ["--version"], timeoutMs: 5_000, maxOutputBytes: 4_096,signal });
   if (result.code === 0) return { id, name, available: true, path: command, version: result.stdout.trim().split(/\r?\n/)[0]?.slice(0, 240) };
   return { id, name, available: false, reason: local ? `${name} cannot run: ${result.stderr.trim() || `exit ${result.code}`}` : `${name} was not found in ${path.join(runtimeRoot, "tools")} or PATH` };
 }
 
-/** Discover only local executables: app tools first, then an explicitly configured path or PATH. */
-export async function probeContentTools(runtimeRoot: string): Promise<ToolAvailability[]> {
-  const standard = await Promise.all([
-    probeExecutable("yt-dlp", "yt-dlp", runtimeRoot, "CONTENT_YTDLP_PATH"),
-    probeExecutable("ffmpeg", "ffmpeg", runtimeRoot, "CONTENT_FFMPEG_PATH"),
-    probeExecutable("ffprobe", "ffprobe", runtimeRoot, "CONTENT_FFPROBE_PATH")
-  ]);
-  const bundledPython = path.join(runtimeRoot, ".venv-content", "Scripts", "python.exe");
-  const python = process.env.CONTENT_PYTHON_PATH || await usableFile(bundledPython) || "python";
-  const asr = await runContentTool({ command: python, args: [path.join(runtimeRoot, "scripts", "transcribe-content.py"), "--probe"], timeoutMs: 8_000, maxOutputBytes: 4_096 });
-  const ocr = await runContentTool({ command: process.env.CONTENT_OCR_PATH || "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path.join(runtimeRoot, "scripts", "ocr-content.ps1"), "-Probe"], timeoutMs: 8_000, maxOutputBytes: 4_096 });
-  return [...standard,
-    { id: "asr", name: "faster-whisper", available: asr.code === 0, path: asr.code === 0 ? python : undefined, version: asr.code === 0 ? asr.stdout.trim().slice(0, 240) : undefined, reason: asr.code === 0 ? undefined : asr.stderr.trim() || "faster-whisper Python runtime or model is unavailable" },
-    { id: "ocr", name: "Windows.Media.Ocr", available: ocr.code === 0, path: ocr.code === 0 ? (process.env.CONTENT_OCR_PATH || "powershell.exe") : undefined, version: ocr.code === 0 ? ocr.stdout.trim().slice(0, 240) : undefined, reason: ocr.code === 0 ? undefined : ocr.stderr.trim() || "Windows.Media.Ocr is unavailable" }
-  ];
+export type ContentToolId="yt-dlp"|"ffmpeg"|"ffprobe"|"asr"|"ocr";
+export interface ContentProbeOptions {ids?:ContentToolId[];force?:boolean;signal?:AbortSignal;}
+const probeCache=new Map<string,{expires:number;tools:ToolAvailability[]}>();
+/** Discover selected local tools; changed files/configuration invalidate the short worker cache. */
+export async function probeContentTools(runtimeRoot:string,options:ContentProbeOptions={}):Promise<ToolAvailability[]>{
+  if(options.signal?.aborted)throw new DOMException("已取消","AbortError");
+  const ids=[...new Set(options.ids??["yt-dlp","ffmpeg","ffprobe","asr","ocr"])] as ContentToolId[];
+  if(!ids.length)return [];
+  const model=process.env.CONTENT_ASR_MODEL||path.join(runtimeRoot,"tools","models","faster-whisper-tiny");
+  const modelFiles=["model.bin","config.json","tokenizer.json"].map(file=>path.join(model,file));
+  const configured=[process.env.CONTENT_YTDLP_PATH,process.env.CONTENT_FFMPEG_PATH,process.env.CONTENT_FFPROBE_PATH,process.env.CONTENT_PYTHON_PATH,process.env.CONTENT_OCR_PATH];
+  const watched=[...configured,...ids.flatMap(id=>[path.join(runtimeRoot,"tools",id),path.join(runtimeRoot,"tools",id+".exe")]),path.join(runtimeRoot,"scripts","ocr-content.ps1"),path.join(runtimeRoot,"scripts","transcribe-content.py"),path.join(runtimeRoot,".venv-content","Scripts","python.exe"),...(ids.includes("asr")?modelFiles:[])].filter((file):file is string=>!!file);
+  const stamps=await Promise.all(watched.map(async file=>{const s=await fs.stat(file).catch(()=>undefined);return s?`${file}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`:`${file}:missing`;}));
+  const key=JSON.stringify([path.resolve(runtimeRoot),ids,configured,process.env.PATH,ids.includes("asr")?model:undefined,stamps]);
+  const cached=probeCache.get(key);if(!options.force&&cached&&cached.expires>Date.now())return cached.tools.map(tool=>({...tool}));
+  const tools:ToolAvailability[]=await Promise.all(ids.filter(id=>["yt-dlp","ffmpeg","ffprobe"].includes(id)).map(id=>probeExecutable(id,id,runtimeRoot,{"yt-dlp":"CONTENT_YTDLP_PATH",ffmpeg:"CONTENT_FFMPEG_PATH",ffprobe:"CONTENT_FFPROBE_PATH"}[id as "yt-dlp"|"ffmpeg"|"ffprobe"],options.signal)));
+  if(ids.includes("asr")){
+    const bundledPython=path.join(runtimeRoot,".venv-content","Scripts","python.exe"),python=process.env.CONTENT_PYTHON_PATH||await usableFile(bundledPython)||"python";
+    const filesReady=(await Promise.all(modelFiles.map(file=>fs.stat(file).then(s=>s.isFile()&&s.size>0,()=>false)))).every(Boolean);
+    if(!filesReady)tools.push({id:"asr",name:"faster-whisper",available:false,reason:"缺少离线 ASR 模型文件：请检查 CONTENT_ASR_MODEL 或安装模型（model.bin、config.json、tokenizer.json）"});
+    else{const asr=await runContentTool({command:python,args:[path.join(runtimeRoot,"scripts","transcribe-content.py"),"--probe","--model",model],timeoutMs:8000,maxOutputBytes:4096,signal:options.signal});tools.push({id:"asr",name:"faster-whisper",available:asr.code===0,path:asr.code===0?python:undefined,version:asr.code===0?asr.stdout.trim().slice(0,240):undefined,reason:asr.code===0?undefined:asr.stderr.trim()||"faster-whisper Python runtime is unavailable"});}
+  }
+  if(ids.includes("ocr")){
+    const command=process.env.CONTENT_OCR_PATH||"powershell.exe",ocr=await runContentTool({command,args:["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",path.join(runtimeRoot,"scripts","ocr-content.ps1"),"-Probe"],timeoutMs:8000,maxOutputBytes:4096,signal:options.signal});tools.push({id:"ocr",name:"Windows.Media.Ocr",available:ocr.code===0,path:ocr.code===0?command:undefined,version:ocr.code===0?ocr.stdout.trim().slice(0,240):undefined,reason:ocr.code===0?undefined:ocr.stderr.trim()||"Windows.Media.Ocr language data is unavailable"});
+  }
+  if(options.signal?.aborted)throw new DOMException("已取消","AbortError");
+  if(probeCache.size>=100)probeCache.clear();probeCache.set(key,{expires:Date.now()+30000,tools});return tools.map(tool=>({...tool}));
 }

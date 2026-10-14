@@ -8,6 +8,8 @@ import { enqueueInputs,getJobs } from "../src/content-jobs.js";
 import { findContent,readContent,saveContent,contentIdentity } from "../src/content-library.js";
 import type { CapturedContent } from "../src/content-types.js";
 import { saveArticle } from "../src/article-library.js";
+import { promises as dns } from "node:dns";
+import { chromium } from "playwright-core";
 async function fixture(t:any){const root=await fs.mkdtemp(path.join(os.tmpdir(),"link-service-"));t.after(()=>fs.rm(root,{recursive:true,force:true}));const [job]=await enqueueInputs(root,[{platform:"web",url:"https://example.com/article",canonicalUrl:"https://example.com/article"}]);return {root,job};}
 const base:CapturedContent={platform:"web",sourceUrl:"https://example.com/article",canonicalUrl:"https://example.com/article",title:"示例",kind:"article",capturedAt:"2026-09-06T00:00:00Z",markdown:"原始文字",assets:[],warnings:[]};
 test("retry restores stable capture paths after readable file names were published",async t=>{
@@ -55,4 +57,95 @@ test("legacy import takes the latest version once and leaves the old library unt
  assert.equal(first.length,1);assert.equal(first[0].title,"新版");assert.deepEqual(first,second);
  const read=await readContent(library,first[0].contentId);if(!read.ok)assert.fail(read.reason);assert.match(read.text,/这是新版/);assert.doesNotMatch(read.text,/这是旧版/);
  assert.equal(await fs.readFile(path.join(newest.directory,"manifest.json"),"utf8"),before);
+});
+
+async function cachedVideoFixture(t: any, platform: "wechat_channels" | "xiaohongshu" = "wechat_channels") {
+ const root = await fs.mkdtemp(path.join(os.tmpdir(), "link-service-video-"));
+ t.after(() => fs.rm(root, { recursive: true, force: true }));
+ t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+ const url = platform === "xiaohongshu" ? "https://xhslink.cn/o/Ao78ExGkuj9" : "https://weixin.qq.com/sph/AiFpm2ZuMh";
+ const input = { platform, url, canonicalUrl: platform === "xiaohongshu" ? "https://www.xiaohongshu.com/explore/6accfa15000000001303c038" : url, nativeId: platform === "xiaohongshu" ? "6accfa15000000001303c038" : "sph:AiFpm2ZuMh" };
+ const [job] = await enqueueInputs(root, [input]);
+ const seed = path.join(root, "seed"); await fs.mkdir(path.join(seed, "video"), { recursive: true });
+ await fs.writeFile(path.join(seed, "video", "001.mp4"), "previously-probed-original-video");
+ const original: CapturedContent = { ...input, sourceUrl: url, title: "已核验视频", kind: "video", capturedAt: base.capturedAt, markdown: "原始视频说明", warnings: [], coverage: { media: "saved: 1 verified MP4 video" }, assets: [
+  { id: "video/001", role: "video", status: "saved", path: "video/001.mp4", sourceUrl: "https://example.com/video.mp4?signature=EXPIRED_PLACEHOLDER", mime: "video/mp4", provenance: "original" }
+ ] };
+ const saved = await saveContent(root, original, seed);
+ return { root, job, input, saved };
+}
+
+test("a derivative retry reuses a verified original video without calling an unavailable parser", async t => {
+ const { root, job, saved } = await cachedVideoFixture(t);
+ let networkCalls = 0; let enriched = false;
+ t.mock.method(globalThis, "fetch", async () => { networkCalls++; throw new Error("parser is unavailable"); });
+ const result = await processContentJob(root, root, job, new AbortController().signal, {
+  resolve: async input => input,
+  enrich: async (record, context) => {
+   const video = record.assets.find(asset => asset.role === "video" && asset.status === "saved");
+   assert.ok(video?.path, "the local original should reach enrichment");
+   assert.equal(video.sha256, saved.assets[0].sha256);
+   assert.equal(await fs.readFile(path.join(context.directory, video.path!), "utf8"), "previously-probed-original-video");
+   assert.equal(record.markdown, "原始视频说明"); enriched = true; return record;
+  }, pdf: async () => undefined
+ });
+ assert.ok(enriched); assert.equal(result.contentId, saved.contentId); assert.equal(networkCalls, 0);
+});
+
+test("a corrupted original cannot bypass reacquisition during a derivative retry", async t => {
+ const { root, job, saved } = await cachedVideoFixture(t);
+ const item = (await findContent(root)).find(item => item.contentId === saved.contentId)!;
+ await fs.writeFile(item.videoPath!, "corrupted");
+ let networkCalls = 0;
+ t.mock.method(globalThis, "fetch", async () => { networkCalls++; return new Response("<body>在微信客户端打开</body>"); });
+ await processContentJob(root, root, job, new AbortController().signal, { resolve: async input => input, enrich: async record => record, pdf: async () => undefined });
+ assert.equal(networkCalls, 1);
+});
+
+test("an alias with a different native identity cannot reuse a cached video", async t => {
+ const { root, job } = await cachedVideoFixture(t);
+ let networkCalls = 0;
+ t.mock.method(globalThis, "fetch", async () => { networkCalls++; return new Response("<body>在微信客户端打开</body>"); });
+ await processContentJob(root, root, job, new AbortController().signal, { resolve: async input => ({ ...input, nativeId: "sph:Different" }), enrich: async record => record, pdf: async () => undefined });
+ assert.equal(networkCalls, 1);
+});
+
+test("a saved Xiaohongshu short-link retry does not resolve or capture the share again", async t => {
+ const { root, job, saved } = await cachedVideoFixture(t, "xiaohongshu");
+ let networkCalls = 0; let browserCalls = 0;
+ t.mock.method(globalThis, "fetch", async () => { networkCalls++; throw new Error("offline"); });
+ t.mock.method(chromium, "launchPersistentContext", async () => { browserCalls++; throw new Error("no browser expected"); });
+ const result = await processContentJob(root, root, job, new AbortController().signal, { enrich: async record => record, pdf: async () => undefined });
+ assert.equal(result.contentId, saved.contentId);
+ assert.equal(networkCalls, 0); assert.equal(browserCalls, 0);
+});
+
+async function restoreFixture(t: any) {
+ const { root, job } = await fixture(t);
+ const seed = path.join(root, "seed"); await fs.mkdir(path.join(seed, "images"), { recursive: true });
+ const assets: CapturedContent["assets"] = [];
+ for (const name of ["a", "b", "c"]) {
+  await fs.writeFile(path.join(seed, "images", `${name}.png`), name.repeat(1024));
+  assets.push({ id: name, role: "image", status: "saved", path: `images/${name}.png`, provenance: "original" });
+ }
+ await saveContent(root, { ...base, assets }, seed);
+ return { root, job };
+}
+
+test("retry restoration reuses intact staging files without copying them again", async t => {
+ const { root, job } = await restoreFixture(t);
+ const deps = { resolve: async (input: any) => input, acquire: async (_input: any, context: any) => context.existing!, enrich: async (record: CapturedContent) => record, pdf: async () => undefined };
+ await processContentJob(root, root, job, new AbortController().signal, deps);
+ const copy = fs.copyFile; let copies = 0;
+ t.mock.method(fs, "copyFile", async (...args: Parameters<typeof fs.copyFile>) => { copies++; return copy(...args); });
+ await processContentJob(root, root, job, new AbortController().signal, deps);
+ assert.equal(copies, 0);
+});
+
+test("cancelling during a restore does not start copies of the following assets", async t => {
+ const { root, job } = await restoreFixture(t);
+ const controller = new AbortController(); const copy = fs.copyFile; let copies = 0;
+ t.mock.method(fs, "copyFile", async (...args: Parameters<typeof fs.copyFile>) => { copies++; await copy(...args); controller.abort(); });
+ await assert.rejects(processContentJob(root, root, job, controller.signal, { resolve: async input => input, acquire: async (_input, context) => context.existing!, enrich: async record => record, pdf: async () => undefined }), { name: "AbortError" });
+ assert.equal(copies, 1);
 });

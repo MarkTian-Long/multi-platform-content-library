@@ -9,7 +9,9 @@ try {
   $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
   $null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType=WindowsRuntime]
   $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
-  if ($Probe) { Write-Output 'Windows.Media.Ocr available'; exit 0 }
+  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+  if ($null -eq $engine) { throw 'Windows OCR language data is unavailable' }
+  if ($Probe) { Write-Output ('Windows.Media.Ocr available (' + $engine.RecognizerLanguage.LanguageTag + ')'); exit 0 }
   if (-not $InputPath -or -not $OutputPath) { throw 'InputPath and OutputPath are required' }
   if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) { throw 'Input image is missing' }
   function Await-WinRt($Operation, [Type]$ResultType) {
@@ -21,8 +23,6 @@ try {
   $stream = Await-WinRt ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
   $decoder = Await-WinRt ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
   $bitmap = Await-WinRt ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-  if ($null -eq $engine) { throw 'Windows OCR language data is unavailable' }
   $result = Await-WinRt ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
   $payload = @{ status = $(if ([string]::IsNullOrWhiteSpace($result.Text)) { 'blank' } else { 'saved' }); text = $result.Text; lines = @($result.Lines | ForEach-Object { $_.Text }) } | ConvertTo-Json -Compress
   [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($OutputPath)) | Out-Null

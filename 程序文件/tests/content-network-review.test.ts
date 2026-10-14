@@ -13,13 +13,18 @@ import { fetchPublic, savePublicAsset, resolvePublicHost } from "../src/content-
 type ResponsePlan = { status?: number; headers?: Record<string, string>; bytes?: Uint8Array; keepOpen?: boolean; noHeaders?: boolean };
 function transport(t: any, plan: ResponsePlan) {
   t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
-  const incoming = new PassThrough() as PassThrough & { headers: Record<string, string>; statusCode: number };
-  incoming.headers = plan.headers ?? {}; incoming.statusCode = plan.status ?? 200;
-  // A real IncomingMessage does not exist before headers; the injected placeholder
-  // must not turn a request-only abort into an unrelated unhandled stream error.
-  incoming.on("error", () => {});
-  t.after(() => incoming.destroy());
+  const fresh = () => {
+    const incoming = new PassThrough() as PassThrough & { headers: Record<string, string>; statusCode: number };
+    incoming.headers = plan.headers ?? {}; incoming.statusCode = plan.status ?? 200;
+    // A real IncomingMessage does not exist before headers; the injected placeholder
+    // must not turn a request-only abort into an unrelated unhandled stream error.
+    incoming.on("error", () => {});
+    t.after(() => incoming.destroy());
+    return incoming;
+  };
+  const first = fresh(); let requests = 0;
   t.mock.method(https, "request", (_url: URL, options: any, callback: (response: any) => void) => {
+    const incoming = requests++ === 0 ? first : fresh();
     const request = new EventEmitter() as EventEmitter & { end(): void; destroy(error?: Error): void; setTimeout(ms: number, callback: () => void): unknown };
     request.destroy = error => { incoming.destroy(error); if (error) request.emit("error", error); };
     request.setTimeout = (_ms, _callback) => request;
@@ -34,7 +39,7 @@ function transport(t: any, plan: ResponsePlan) {
     });
     return request;
   });
-  return incoming;
+  return first;
 }
 async function directory(t: any) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "content-network-review-"));
@@ -114,4 +119,32 @@ test("default network deadline applies without a caller-provided signal",async t
  transport(t,{noHeaders:true});const original=AbortSignal.timeout.bind(AbortSignal);let bounded=false;
  t.mock.method(AbortSignal,"timeout",(delay:number)=>{if(delay!==5*60000)return original(delay);bounded=true;const controller=new AbortController();const timer=setTimeout(()=>controller.abort(new DOMException("network deadline","TimeoutError")),20);t.after(()=>clearTimeout(timer));return controller.signal;});
  await assert.rejects(fetchPublic("https://example.com/hanging"),/abort|deadline/i);assert.equal(bounded,true);
+});
+
+test("native pinned HTTP sends the JSON POST body instead of silently discarding it", async t => {
+  t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const incoming = new PassThrough() as PassThrough & { headers: Record<string, string>; statusCode: number };
+  incoming.headers = { "content-type": "application/json" }; incoming.statusCode = 200;
+  t.after(() => incoming.destroy());
+  let sent: unknown;
+  let requestHeaders: Record<string, string> = {};
+  t.mock.method(https, "request", (_url: URL, options: any, callback: (response: any) => void) => {
+    requestHeaders = options.headers;
+    const request = new EventEmitter() as EventEmitter & { end(body?: unknown): void };
+    request.end = body => { sent = body; queueMicrotask(() => { callback(incoming); incoming.end('{"ok":true}'); }); };
+    return request;
+  });
+  const body = JSON.stringify({ url: "https://weixin.qq.com/sph/Example123", description: "视频" });
+  const response = await fetchPublic("https://example.com/parser", { method: "POST", headers: { "content-type": "application/json" }, body });
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.equal(Buffer.from(sent as string).toString(), body);
+  assert.equal(Number(requestHeaders["content-length"]), Buffer.byteLength(body));
+});
+
+test("parser requests can refuse redirects without transmitting their body to another endpoint", async t => {
+  t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => { requests++; return new Response(null, { status: 307, headers: { location: "https://example.org/other" } }); });
+  await assert.rejects(fetchPublic("https://example.com/parser", { method: "POST", redirect: "error", body: "public-share-link" }), /重定向/);
+  assert.equal(requests, 1);
 });

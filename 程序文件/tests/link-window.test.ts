@@ -34,6 +34,7 @@ $form.Dispose()
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'finished'), 'ok')
 `);
   fs.copyFileSync(path.join(programRoot, 'reader-process.ps1'), path.join(fixtureProgram, 'reader-process.ps1'));
+  fs.copyFileSync(path.join(programRoot, 'link-library-dialogs.ps1'), path.join(fixtureProgram, 'link-library-dialogs.ps1'));
   fs.writeFileSync(path.join(fixtureProgram, 'dist', 'link-cli.js'), '');
   try {
     const launched = spawnSync('cmd.exe', ['/d', '/s', '/c', `""${launcherPath}""`], {

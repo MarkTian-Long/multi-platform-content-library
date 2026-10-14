@@ -14,6 +14,7 @@ Set-Content -LiteralPath (Join-Path $tempProject '资料库\items\content-1\资�
 Set-Content -LiteralPath (Join-Path $tempProject '资料库\items\content-2\reading.html') -Value '<h1>微信资料</h1>' -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'link-window.ps1') -Destination (Join-Path $tempProgram 'link-window.ps1')
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'reader-process.ps1') -Destination (Join-Path $tempProgram 'reader-process.ps1')
+Copy-Item -LiteralPath (Join-Path $sourceRoot 'link-library-dialogs.ps1') -Destination (Join-Path $tempProgram 'link-library-dialogs.ps1')
 $fakeCli = @'
 const fs = require('fs');
 const path = require('path');
@@ -184,7 +185,21 @@ try {
   Assert-Window ($assetStatusLabel.Text -notmatch '过期资料') '旧read结果覆盖了新选择'
   Wait-WindowOperation
   Assert-Window ($script:linkReadContentId -eq 'content-2') '未为最新选择补发read'
-  [pscustomobject]@{ok=$true;version=$PSVersionTable.PSVersion.ToString();checks=32} | ConvertTo-Json -Compress
+  $socialItems = @([pscustomobject]@{ platform = 'douyin'; contentId = 'douyin-only' }, [pscustomobject]@{ platform = 'weibo'; contentId = 'weibo-only' }, [pscustomobject]@{ platform = 'web'; contentId = 'other' })
+  foreach ($socialPlatform in @([pscustomobject]@{ Text = '抖音'; Value = 'douyin' }, [pscustomobject]@{ Text = '微博'; Value = 'weibo' })) {
+    $platformCombo.SelectedItem = $socialPlatform.Text
+    Wait-WindowOperation
+    $socialFiltered = @(Get-LinkFilteredItems $socialItems)
+    Assert-Window ($socialFiltered.Count -eq 1 -and $socialFiltered[0].platform -eq $socialPlatform.Value) ('新平台筛选错误：' + $socialPlatform.Text)
+    $loginOption = @($loginPlatformCombo.Items | Where-Object { $_.Value -eq $socialPlatform.Value })
+    Assert-Window ($loginOption.Count -eq 1) ('新平台缺少专用登录选项：' + $socialPlatform.Text)
+    $loginPlatformCombo.SelectedItem = $loginOption[0]
+    [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($loginButton, @([EventArgs]::Empty)) | Out-Null
+    Wait-WindowOperation
+    $socialCalls = @(Get-Content -LiteralPath (Join-Path $tempProgram 'link-calls.jsonl') | ForEach-Object { $_ | ConvertFrom-Json })
+    Assert-Window (@($socialCalls | Where-Object { $_.command -eq 'login' -and $_.args[0] -eq $socialPlatform.Value }).Count -eq 1) ('专用登录传入平台错误：' + $socialPlatform.Text)
+  }
+  [pscustomobject]@{ok=$true;version=$PSVersionTable.PSVersion.ToString();checks=38} | ConvertTo-Json -Compress
 } finally {
   if ($script:linkJob) { try { Stop-ReaderProcess $script:linkJob } catch {} }
   if ($linkTimer) { $linkTimer.Dispose() }

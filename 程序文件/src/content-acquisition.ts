@@ -5,20 +5,28 @@ import { load } from "cheerio";
 import TurndownService from "turndown";
 import { chromium } from "playwright-core";
 import { resolveEdgeExecutable, isPathWithin } from "./url-policy.js";
-import { fetchPublic, savePublicAsset, publicHttpUrl } from "./content-network.js";
+import { fetchPublic, fetchedPublicUrl, savePublicAsset, publicHttpUrl } from "./content-network.js";
+import { parseContentLinks } from "./content-input.js";
+import { extractXiaohongshuSnapshot } from "./content-xiaohongshu.js";
+import { acquireWechatChannels, type WechatChannelsDeps } from "./content-wechat-channels.js";
+import { acquireYoutube } from "./content-ytdlp-platform.js";
+import { readContentSettings, readParserCredential } from "./content-settings.js";
+import { videoParserTransport } from "./content-parser-transport.js";
 import { runContentTool } from "./content-tools.js";
+import type { captureSocialBrowser } from "./content-social-browser.js";
 import type { CapturedContent, ContentAsset, ContentContext, ContentInput, ContentPart } from "./content-types.js";
 import { writableFile,atomicReplace } from "./content-library.js";
 
 export { openContentLogin } from "./content-network.js";
 
 export interface ToolRunResult { code: number; stdout: string; stderr: string; timedOut: boolean; cancelled: boolean; outputTruncated: boolean; }
-export interface XiaohongshuSnapshot { finalUrl: string; title: string; author?: string; body: string; images: string[]; recommendedImages?: string[]; videos: string[]; }
+export interface XiaohongshuSnapshot { finalUrl: string; title: string; author?: string; body: string; images: string[]; recommendedImages?: string[]; videos: string[]; videoExpected?: boolean; }
 export interface MediaProbe { video: boolean; audio: boolean; durationSeconds?: number; }
-export interface AcquisitionDeps {
+export interface AcquisitionDeps extends WechatChannelsDeps {
   runTool?: (command: string, args: string[], context: ContentContext) => Promise<ToolRunResult>;
   ytDlpPath?: string;
   captureXiaohongshu?: (input: ContentInput, context: ContentContext) => Promise<XiaohongshuSnapshot>;
+  captureBrowser?: typeof captureSocialBrowser;
   probeMedia?: (file: string, context: ContentContext) => Promise<MediaProbe | undefined>;
 }
 const BILIBILI_MAX_PARTS = 50;
@@ -110,17 +118,30 @@ function loginPage(text: string): boolean { return /^(请登录|登录后查看|
 
 /** Reads one explicit rendered Xiaohongshu note subtree. Missing or ambiguous roots are unavailable, never the page main/body. */
 export function extractXiaohongshuNoteHtml(html: string, finalUrl: string): XiaohongshuSnapshot {
-  const $ = load(html);
-  const raw = $("#noteContainer,.note-container,.note-detail-mask,[data-note-id]").filter((_, node) => !$(node).closest("[class*=recommend],[class*=related],[data-testid*=recommend]").length);
-  const candidates = raw.filter((_, node) => !raw.toArray().some((other) => other !== node && $(node).find(other).length > 0));
-  if (candidates.length !== 1) return { finalUrl, title: "", body: "", images: [], videos: [] };
-  const root = candidates.first();
-  const insideNote = (node: Parameters<typeof root.find>[0] extends never ? never : unknown): boolean => !$(node as never).closest("[class*=recommend],[class*=related],[data-testid*=recommend]").length;
-  const text = (selector: string) => root.find(selector).first().text().trim();
-  const bodyRoot = root.find(".note-content,.content,.desc,[data-testid=note-content]").first().clone(); bodyRoot.find(".recommend,.related,.comments,.author,[data-testid*=recommend]").remove();
-  const images = [...root.find(".note-media img,[data-testid*=media] img").toArray(), ...root.children("img").toArray()].filter(insideNote).map((node) => $(node).attr("data-src") || $(node).attr("data-original") || $(node).attr("src") || "").map((url) => cleanUrl(url, finalUrl)).filter((url): url is string => !!url);
-  const videos = root.find("video").toArray().filter(insideNote).map((node) => $(node).attr("src") || "").map((url) => cleanUrl(url, finalUrl)).filter((url): url is string => !!url);
-  return { finalUrl, title: text("h1,.title"), author: text(".author,.user-name,[data-testid=author]") || undefined, body: bodyRoot.text().trim(), images, videos };
+  return extractXiaohongshuSnapshot(html, finalUrl);
+}
+
+async function publicXiaohongshu(input: ContentInput, context: ContentContext): Promise<XiaohongshuSnapshot | undefined> {
+  const headers = { Accept: "text/html", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36" };
+  const signal = AbortSignal.any([AbortSignal.timeout(25_000), ...(context.signal ? [context.signal] : [])]);
+  try {
+    let response = await fetchPublic(input.url, { headers }, signal);
+    if (!response.ok) { await response.body?.cancel().catch(() => {}); return undefined; }
+    let finalUrl = fetchedPublicUrl(response) || input.url;
+    const landing = new URL(finalUrl);
+    const redirectPath = landing.searchParams.get("redirectPath");
+    if (landing.pathname === "/login" && landing.hostname === "www.xiaohongshu.com" && redirectPath) {
+      const noteUrl = new URL(redirectPath, landing.origin);
+      const target = parseContentLinks(noteUrl.toString())[0];
+      if (noteUrl.hostname === "www.xiaohongshu.com" && target?.nativeId && (!input.nativeId || input.nativeId === target.nativeId)) {
+        await response.body?.cancel().catch(() => {});
+        response = await fetchPublic(noteUrl, { headers }, signal);
+        finalUrl = fetchedPublicUrl(response) || noteUrl.toString();
+      }
+    }
+    const snapshot = extractXiaohongshuSnapshot(await boundedHtml(response, signal), finalUrl);
+    return snapshot.body || snapshot.images.length || snapshot.videos.length || snapshot.videoExpected ? snapshot : undefined;
+  } catch (error) { if (context.signal?.aborted) throw error; return undefined; }
 }
 
 async function acquireXiaohongshu(input: ContentInput, context: ContentContext, deps: AcquisitionDeps): Promise<CapturedContent> {
@@ -131,30 +152,54 @@ async function acquireXiaohongshu(input: ContentInput, context: ContentContext, 
     let snapshot: XiaohongshuSnapshot;
     if (deps.captureXiaohongshu) snapshot = await deps.captureXiaohongshu(input, context);
     else {
+      const publiclyReadable = await publicXiaohongshu(input, context);
+      if (publiclyReadable && (!publiclyReadable.videoExpected || publiclyReadable.videos.length)) snapshot = publiclyReadable;
+      else {
       await fs.mkdir(profile, { recursive: true });
-      browser = await chromium.launchPersistentContext(profile, { executablePath: resolveEdgeExecutable(), headless: false });
+      browser = await chromium.launchPersistentContext(profile, { executablePath: resolveEdgeExecutable(), headless: true });
       const page = browser.pages()[0] ?? await browser.newPage();
       await browser.route("**/*", async (route) => { try { await publicHttpUrl(route.request().url()); await route.continue(); } catch { await route.abort(); } });
       const closeOnAbort = () => void browser?.close(); context.signal?.addEventListener("abort", closeOnAbort, { once: true });
       context.onProgress?.("正在通过专用小红书 Edge 会话加载笔记主体");
-      await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 45_000 }); await page.waitForTimeout(1_500); await publicHttpUrl(page.url());
+      await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      await page.waitForFunction(() => /\/login(?:\?|$)/.test(location.href) || !!document.querySelector("#noteContainer,.note-container,.note-detail-mask,[data-note-id]"), undefined, { timeout: 10_000 }).catch(() => {});
+      await publicHttpUrl(page.url());
       const renderedHtml = await page.content();
       snapshot = extractXiaohongshuNoteHtml(renderedHtml, page.url());
-      if (loginPage(await page.locator("body").innerText())) snapshot = { ...snapshot, body: "请登录或完成验证" };
+      const publicNote = publiclyReadable ? parseContentLinks(publiclyReadable.finalUrl)[0]?.nativeId : undefined;
+      const browserNote = parseContentLinks(snapshot.finalUrl)[0]?.nativeId;
+      if (publicNote && browserNote && publicNote !== browserNote) throw new Error("浏览器跳转到了其他笔记，未混用页面内容");
+      if (publiclyReadable?.videoExpected && publicNote && publicNote === browserNote && !snapshot.videos.length) snapshot = { ...snapshot, videoExpected: true };
+      if (/^\/(?:login|verify|captcha)(?:\/|$)/.test(new URL(page.url()).pathname) || loginPage(await page.locator("body").innerText())) snapshot = { ...snapshot, body: "请登录或完成验证" };
       context.signal?.removeEventListener("abort", closeOnAbort);
+      }
     }
     await publicHttpUrl(snapshot.finalUrl);
+    const target = parseContentLinks(snapshot.finalUrl)[0];
+    if (input.nativeId && target?.nativeId && input.nativeId !== target.nativeId) throw new Error("页面跳转到了其他笔记，未采集该内容");
+    if (target?.platform === "xiaohongshu" && target.nativeId) { content.nativeId = target.nativeId; content.canonicalUrl = target.canonicalUrl; }
     if (loginPage(snapshot.body)) {
       content.title = safeTitle(snapshot.title); content.warnings.push("页面要求登录或验证；请使用“登录平台”入口完成登录后重试"); content.assets.push({ id: "login", role: "source", status: "login_required", reason: "登录或验证码页面" }); content.coverage!.body = "login_required"; await checkpoint(context, content); return content;
     }
     content.title = safeTitle(snapshot.title);
     content.author = snapshot.author;
     content.markdown = snapshot.body.trim();
-    content.kind = snapshot.videos.length ? "video" : "gallery";
-    content.coverage!.body = content.markdown ? "saved: rendered text" : "unavailable: rendered body empty";
+    content.kind = snapshot.videos.length || snapshot.videoExpected ? "video" : "gallery";
+    content.coverage!.body = content.markdown ? "saved: note text" : "unavailable: note body empty";
     await checkpoint(context, content);
+    if(snapshot.videoExpected&&!snapshot.videos.length){content.assets.push({id:"video/001",role:"video",status:"unavailable",reason:"该笔记是视频，但本次未取得可下载的视频地址；请核对登录与平台访问条件",provenance:"original"});content.coverage!.media="unavailable: known video has no downloadable stream";await checkpoint(context,content);}
     for (const [offset, sourceUrl] of snapshot.images.entries()) {const stem=`images/${String(offset + 1).padStart(3, "0")}`;content.assets.push(await savePublicAsset(sourceUrl, context.directory, stem, "image", context.signal, 25 * 1024 * 1024,context.existing?.assets.find(a=>a.id===stem))); await checkpoint(context, content); }
-    for (const [offset, sourceUrl] of snapshot.videos.entries()) {const stem=`video/${String(offset + 1).padStart(3, "0")}`;content.assets.push(await savePublicAsset(sourceUrl, context.directory, stem, "video", context.signal,100*1024*1024,context.existing?.assets.find(a=>a.id===stem))); await checkpoint(context, content); }
+    for (const [offset, sourceUrl] of snapshot.videos.entries()) {
+      const stem=`video/${String(offset + 1).padStart(3, "0")}`;
+      const asset = await savePublicAsset(sourceUrl, context.directory, stem, "video", context.signal,2*1024*1024*1024,context.existing?.assets.find(a=>a.id===stem));
+      if (asset.status === "saved" && asset.path) {
+        const file = await writableFile(context.directory,asset.path);
+        const probe = deps.probeMedia ? await deps.probeMedia(file,context) : await probeVideo(file,context,deps.runTool ?? localRunner,await executable(context.runtimeRoot,process.platform === "win32" ? ["ffprobe.exe","ffprobe"] : ["ffprobe"]));
+        if (!probe?.video) { asset.status = probe ? "unavailable" : "missing_dependency"; asset.reason = probe ? "下载文件没有有效视频流，未标记为下载成功" : "下载文件尚未验证视频流，请检查 ffprobe"; }
+      }
+      content.assets.push(asset); await checkpoint(context,content);
+    }
+    if(snapshot.videos.length)content.coverage!.media=content.assets.some(a=>a.role==="video"&&a.status==="saved")?"saved: verified video":"unavailable: no verified video";
     return content;
   } catch (error) { content.warnings.push(publicMessage(error)); content.coverage!.body = "failed"; await checkpoint(context, content); return content; }
   finally { await browser?.close().catch(() => {}); }
@@ -171,7 +216,7 @@ async function executable(runtimeRoot: string, names = process.platform === "win
 
 async function probeVideo(file: string, context: ContentContext, runner: AcquisitionDeps["runTool"], command: string | undefined): Promise<MediaProbe | undefined> {
   if (!command) return undefined;
-  const result = await (runner ?? localRunner)(command, ["-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json", file], context).catch(() => undefined);
+  const result = await (runner ?? localRunner)(command, ["-protocol_whitelist", "file,pipe", "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json", file], context).catch(() => undefined);
   if (!result || result.code !== 0) return undefined;
   try {
     const parsed = JSON.parse(result.stdout) as { streams?: Array<{ codec_type?: string }>; format?: { duration?: string } };
@@ -324,7 +369,19 @@ export async function acquireContent(input: ContentInput, context: ContentContex
   await fs.mkdir(context.directory, { recursive: true });
   if (context.signal?.aborted) throw new DOMException("已取消", "AbortError");
   if (input.platform === "xiaohongshu") return acquireXiaohongshu(input, context, deps);
+  if (input.platform === "wechat_channels") {
+    let channelsDeps: WechatChannelsDeps = deps;
+    if (deps.parserEndpoint === undefined && new URL(input.url).hostname === "weixin.qq.com") {
+      const parser = (await readContentSettings(context.runtimeRoot)).wechatChannelsParser;
+      if(parser.enabled)channelsDeps={...deps,parserEndpoint:parser.endpoint,parserCredential:await readParserCredential(context.runtimeRoot,parser.endpoint),...(parser.proxyUrl?{parserFetch:videoParserTransport(parser.proxyUrl)}:{})};
+    }
+    return acquireWechatChannels(input,context,channelsDeps);
+  }
+  if (input.platform === "bilibili" && input.nativeId?.startsWith("dynamic:")) return (await import("./content-bilibili-dynamic.js")).acquireBilibiliDynamic(input,context);
   if (input.platform === "bilibili") return acquireBilibili(input, context, deps);
+  if (input.platform === "youtube") return acquireYoutube(input, context, deps);
+  if (input.platform === "douyin") return (await import("./content-douyin.js")).acquireDouyin(input, context, deps);
+  if (input.platform === "weibo") return (await import("./content-weibo.js")).acquireWeibo(input, context, deps);
   if (input.platform === "wechat") return { ...capturedBase(input, "article"), warnings: ["微信采集由现有采集器适配层处理"], coverage: { body: "delegated: wechat adapter" } };
   return acquireWeb(input, context);
 }
