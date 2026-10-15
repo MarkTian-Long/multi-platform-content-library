@@ -1,0 +1,71 @@
+# Multi-platform Content Library
+
+[中文](README.md) | [English](README.en.md)
+
+A Windows application for collecting links you submit and local files you select. It saves material for offline reading, search, correction, and export, while retaining originals, machine-generated transcripts, and human revisions separately.
+
+This is the English repository overview. The application interface and linked detailed guides are currently primarily in Chinese. Keep Chinese directory and file names unchanged when following the commands.
+
+## First installation
+
+Requires Windows, Microsoft Edge, Windows PowerShell 5.1, and Node.js 22.13.0 or newer. Current acceptance checks used Node.js 24. Speech transcription additionally needs Python and an offline model, available through the application's tool installation entry.
+
+After cloning or downloading the source, open a terminal in the project root:
+
+```powershell
+cd 程序文件
+cmd /c npm ci
+cmd /c npm run build
+```
+
+Then double-click the single everyday launcher, [启动多平台资料库.cmd](启动多平台资料库.cmd). It opens a separate application window and closes its console; closing the startup console does not stop the application window. If tools are missing, use “Install to application directory” under “Login and dependencies.” Preparing tools and models requires network access; once prepared, transcription and OCR run locally.
+
+## Everyday use
+
+1. Paste a link in “Collection tasks,” choose originals, originals plus transcript, or full processing, then select “Save link.” The window defaults to originals plus transcript. Full processing adds video keyframes and image recognition; CLI/MCP calls without an option and existing tasks retain full processing.
+2. Use “Result details” to inspect saved items, missing-item reasons, and actions, or open and correct transcripts. Machine/platform originals remain separate, revision history is recoverable, and existing reading PDFs update with corrections.
+3. Search text and tags in “Library,” filter by platform/favorites, open offline pages, media, transcripts, and PDFs, and export a directory bundle or verified ZIP.
+4. Import text, HTML, text-layer PDFs, DOCX, images, audio, and video. Originals are copied only; original images can use offline OCR, and videos can be transcribed locally.
+5. Archive and restore completed/canceled tasks while retaining their material. Failed and partially saved tasks can be retried. Check ownership and recovery conditions before cleaning working copies or old logs.
+
+## Platforms and formats
+
+| Source | Main current scope |
+| --- | --- |
+| WeChat Official Accounts | Article text, images, and obtainable embedded videos |
+| WeChat Channels | Share links and obtainable videos, with optional third-party share-link parsing |
+| Xiaohongshu | Note text, images, video, short links, and a dedicated Edge profile; original live-photo image objects, companion motion clips, and quality selection |
+| Bilibili | BV/b23 videos, available subtitles/comments/danmaku, multi-part videos, animated posts, and related BV references |
+| Douyin | Individual videos, static/live-photo collections, and share short links; collection versions selected using watermark evidence, dimensions, and bitrate |
+| Weibo | Individual posts, mobile/TV/short-link entries, original text/images/target video; original live-photo images and companion MOV/MP4 files |
+| YouTube | Clearly identified individual videos: title, description, verified MP4, and locally derived material |
+| General web pages | Readable article text and images |
+| Local files | TXT/MD/HTML, text-layer PDF, DOCX, PNG/JPEG/WebP/BMP, MP4/MOV/WebM/MKV, M4A/MP3/WAV/AAC/FLAC/OGG |
+
+See the [platform and format support matrix](程序文件/docs/platform-support.md) for exact link/format coverage and limits. Login, CAPTCHAs, paywalls, expired URLs, and platform restrictions can affect results. Scanned-PDF OCR, EPUB, arbitrary web video, and YouTube playlists/live streams/native subtitles/comments are not currently supported.
+
+For Xiaohongshu, Douyin, and Weibo live photos, images and companion videos are saved separately. Reading pages identify the original photo sequence and support offline playback. Declared motion clips that are missing, protected, or fail validation produce a partial-save status; successfully obtained images remain available.
+
+When Xiaohongshu explicitly provides a resource identity for the same photo, the application can obtain the original object and retain its actual JPEG/WebP/HEIC/HEIF format; HEIC/HEIF also retains a platform web preview. Douyin collections prefer versions marked by the platform as watermark-free, compare source dimensions and bitrate, and avoid preferring watermarked download templates. Files are not transcoded. Reading pages show measured dimensions, original object/platform version/web preview, and watermark evidence. Retries retain the higher-quality original for the same resource and reuse verified previews. In a measured Xiaohongshu sample, a 1080×1440 web image yielded a 3024×4032 HEIC; Douyin images matched API-declared dimensions, while the motion sample provided only 720×960 and was marked watermark-free. The Xiaohongshu motion sample still had a watermark. Without source evidence, the state is explicitly unknown. There is no promise that every link yields an author's uploaded master or a watermark-free version. See [quality and watermark acceptance](程序文件/docs/reviews/2026-10-14-original-media-quality.md).
+
+GIFs retain their original bytes; PDFs are static reading copies. Importing native composite Live Photo files from phone galleries is not yet available. See the initial [photo collection acceptance](程序文件/docs/reviews/2026-10-14-photo-collections.md) for its scope.
+
+YouTube offers automatic/direct/local-proxy settings and dedicated browser verification. HTTP 429 responses trigger cooldowns of 5, 15, and 30 minutes, with at most three automatic resumptions; a longer valid `Retry-After` is respected. Tasks resume when due while the application window is open. Closing the window preserves the waiting record for the next launch. Repeated rate limits or platform verification require human handling. Other platforms continue, and existing material remains available.
+
+Third-party WeChat Channels parsing is off by default. When enabled, it sends only the share link you actively submit, without platform cookies or account information. Media and recognition outputs stay locally. A fresh clone does not inherit another machine's proxy selection, login, or models. Success on public samples does not prove that all links remain accessible.
+
+## Directories and maintenance
+
+| Path | Purpose | Synced to GitHub |
+| --- | --- | --- |
+| Root READMEs, CHANGELOG, and everyday launcher | Installation, usage, and version entry points | Yes |
+| Source/scripts/tests/docs/dependency manifests under `程序文件` | Application and maintenance material | Yes |
+| `资料库`, `文章库` | Saved material, queues/organization/revisions/history, and WeChat-compatible storage | No |
+| Dependencies/builds/tools/models/logs/dedicated accounts/local configuration under `程序文件` | Local runtime material | No |
+| `版本备份` | Local source-recovery ZIPs with hash manifests | No |
+
+See [directory conventions](程序文件/docs/directory-conventions.md) for the full rules and [cleanup records](程序文件/docs/workspace-cleanup.md) for actual cleanup. The legacy WeChat entry at `程序文件/legacy/启动公众号文章阅读器.cmd` continues to read the original article library.
+
+See the [development guide](程序文件/README.md) for maintenance and checks, [MCP setup](程序文件/docs/mcp-setup.md) for registration, and the [manual](程序文件/docs/link-library-manual.md) for operation. The application does not import your default browser's data, monitor the clipboard, or call cloud AI APIs. Syncing source to GitHub does not back up user material.
+
+As of 2026-10-14, the latest 725 regression checks, type checking, and build passed. A separate 218-check run and four original counterexample rechecks have their own evidence. HEIC encoded data, full decoding of 31 motion clips, and offline playback passed; 712 files in the active/legacy libraries were unchanged. See [quality and watermark acceptance](程序文件/docs/reviews/2026-10-14-original-media-quality.md) for scope. Initial photo-collection 665/225, organization-lock increment 17, Weibo 593/99, YouTube 43, and Douyin-state 41 checks retain their respective historical identities. See [CHANGELOG](CHANGELOG.md) and [upgrade acceptance](程序文件/docs/plans/2026-10-14-library-usability-upgrade.md). Original logs and user material remain local; the source includes sanitized explanations and rerunnable tests.
