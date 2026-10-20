@@ -92,9 +92,12 @@ async function defaultPdfGenerator(html: string): Promise<Uint8Array> {
 }
 
 export async function generateArticlePdf(directory: string, manifest: ArticleManifest, generator: PdfGenerator = defaultPdfGenerator): Promise<PdfStatus> {
+  if(manifest.contentId&&generator===defaultPdfGenerator){
+    try{const {generateContentPdf}=await import("./content-service.js");const file=await generateContentPdf(directory);return file?{status:"saved",path:file}:{status:"failed",reason:"未生成当前阅读PDF"};}catch(error){return {status:"failed",reason:describeError(error,"PDF 生成")};}
+  }
   const temporary = path.join(directory, `.pdf-${crypto.randomUUID()}.tmp`);
   try {
-    const html = await embedLocalImages(buildPdfHtml(await fs.readFile(path.join(directory, "source.html"), "utf8"), manifest, directory), manifest, directory);
+    const html = await embedLocalImages(buildPdfHtml(await fs.readFile(path.join(directory, manifest.htmlFile ?? "source.html"), "utf8"), manifest, directory), manifest, directory);
     const fileName = articleFileName(manifest.title, "pdf");
     const output = path.join(directory, fileName);
     await fs.writeFile(temporary, await generator(html));

@@ -5,7 +5,7 @@
   "scripts": {
     "test": "tsx --test tests/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-windows-launcher.mjs",
     "start": "node dist/index.js",
     "link": "node dist/link-cli.js",
     "doctor": "node dist/link-cli.js doctor"

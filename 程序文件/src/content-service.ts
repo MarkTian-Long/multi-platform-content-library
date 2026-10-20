@@ -1,3 +1,5 @@
+import { ownedArticleWorkerToken } from "./article-write-lock.js";
+import { preserveCurrentPdf } from "./article-unified.js";
 import type { ContentInput,ContentJob,ContentJobResult,ContentContext,CapturedContent } from "./content-types.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -20,7 +22,7 @@ export { runtimeDirectory,contentRoot } from "./content-runtime.js";
 export interface ServiceDeps { resolve?:(input:ContentInput,signal?:AbortSignal)=>Promise<ContentInput>; acquire?:(input:ContentInput,context:ContentContext)=>Promise<CapturedContent>;enrich?:(record:CapturedContent,context:ContentContext)=>Promise<CapturedContent>;pdf?:(directory:string,signal?:AbortSignal)=>Promise<string|undefined>; }
 
 export async function generateContentPdf(directory:string,signal?:AbortSignal):Promise<string|undefined>{
-  if(signal?.aborted)throw new DOMException("已取消","AbortError");const browser=await chromium.launch({executablePath:resolveEdgeExecutable(),headless:true});
+  if(signal?.aborted)throw new DOMException("已取消","AbortError");await preserveCurrentPdf(directory);const browser=await chromium.launch({executablePath:resolveEdgeExecutable(),headless:true});
   const abort=()=>{void browser.close().catch(()=>{});};signal?.addEventListener("abort",abort,{once:true});
   const temporary=await writableFile(directory,"阅读.pending.pdf");
   try{const manifest=JSON.parse(await fs.readFile(await containedFile(directory,"content.json"),"utf8"));
@@ -44,17 +46,19 @@ async function copyAsset(sourceDir:string,relative:string,stage:string,destinati
   signal?.throwIfAborted();
 }
 async function legacyRecord(root:string,legacyRoot:string,manifest:ArticleManifest,directory:string,stage:string):Promise<CapturedContent>{
-  const file=await containedFile(legacyRoot,path.relative(legacyRoot,path.join(directory,manifest.markdownFile??"article.md")));
+  const file=await containedFile(directory,manifest.markdownFile??"article.md");
+  if(manifest.contentId){const saved=JSON.parse(await fs.readFile(await containedFile(directory,"content.json"),"utf8"));for(const a of saved.assets)if(a.status==="saved"&&a.path)await copyAsset(directory,a.path,stage);return saved;}
   const input=parseContentLinks(manifest.sourceUrl)[0];const record:CapturedContent={platform:"wechat",nativeId:input?.nativeId??manifest.articleId,sourceUrl:manifest.sourceUrl,canonicalUrl:input?.canonicalUrl??manifest.sourceUrl,title:manifest.title,capturedAt:manifest.extractedAt,kind:"article",markdown:await fs.readFile(file,"utf8"),assets:[],warnings:[],coverage:{legacyArticleId:manifest.articleId}};
   for(const image of manifest.images??[]){const asset={id:`image-${image.index}`,role:"image" as const,status:image.status==="saved"?"saved" as const:"failed" as const,path:image.localPath,provenance:"original" as const};
     if(asset.path&&asset.status==="saved")try{await copyAsset(directory,asset.path,stage);}catch{asset.status="failed";}record.assets.push(asset);}
   for(const video of manifest.videos??[]){const asset={id:`video-${video.videoId??video.index}`,role:"video" as const,status:video.status==="saved"?"saved" as const:"unavailable" as const,path:video.localPath,reason:video.reason,provenance:"original" as const};
     if(asset.path&&asset.status==="saved")try{await copyAsset(directory,asset.path,stage);}catch{asset.status="unavailable";}record.assets.push(asset);}
-  if(manifest.pdf?.status==="saved"){const relative=path.basename(manifest.pdf.path);try{await copyAsset(directory,relative,stage);record.assets.push({id:"legacy-pdf",role:"pdf",status:"saved",path:relative,provenance:"generated"});}catch{record.warnings.push("原文章PDF路径不可读取，可在新窗口重新生成");}}
+  if(manifest.pdf?.status==="saved"){const relative=manifest.pdf.path;try{await copyAsset(directory,relative,stage);record.assets.push({id:"legacy-pdf",role:"pdf",status:"saved",path:relative,provenance:"generated"});}catch{record.warnings.push("原文章PDF路径不可读取，可在新窗口重新生成");}}
   return record;
 }
 async function acquireWechat(input:ContentInput,context:ContentContext):Promise<CapturedContent>{
-  const result=await runContentTool({command:process.execPath,args:[path.join(context.runtimeRoot,"dist","cli.js"),"capture",input.url],cwd:context.runtimeRoot,env:{...process.env,WECHAT_ARTICLE_READER_ROOT:context.runtimeRoot},signal:context.signal,timeoutMs:600000,maxOutputBytes:1048576});
+  const workerRoot=context.libraryRoot??contentRoot(context.runtimeRoot),workerToken=await ownedArticleWorkerToken(workerRoot);
+  const result=await runContentTool({command:process.execPath,args:[path.join(context.runtimeRoot,"dist","cli.js"),"capture",input.url],cwd:context.runtimeRoot,env:{...process.env,WECHAT_ARTICLE_READER_ROOT:context.runtimeRoot,CONTENT_LIBRARY_NATIVE_CAPTURE:"1",CONTENT_LIBRARY_ROOT:workerRoot,CONTENT_LIBRARY_PARENT_WORKER_TOKEN:workerToken},signal:context.signal,timeoutMs:600000,maxOutputBytes:1048576});
   if(result.cancelled)throw new DOMException("已取消","AbortError");let parsed:{ok?:boolean;articleId?:string;message?:string}={};try{parsed=JSON.parse(result.stdout);}catch{}
   if(!parsed.articleId)throw new Error(publicValue(parsed.message||"微信读取失败，原窗口与已存资料仍可使用"));
   const legacyRoot=resolveLibraryRoot(context.runtimeRoot),article=await readArticle(legacyRoot,parsed.articleId);if(!article.ok)throw new Error(article.reason);
@@ -124,10 +128,10 @@ export async function processContentJob(runtimeRoot:string,root:string,job:Conte
     existing.markdown=rewriteLocalAssetLinks(existing.markdown,restorePaths);
   }
   let latest=previous?.manifest;let pendingProgress=Promise.resolve();let lastProgress=0;let lastProgressMessage="";
-  const context:ContentContext={runtimeRoot,directory:stage,signal,existing,processing:input.processing,onProgress:(message,progress)=>{
+  const context:ContentContext={runtimeRoot,libraryRoot:root,directory:stage,signal,existing,processing:input.processing,onProgress:(message,progress)=>{
     if(Date.now()-lastProgress<250&&!progress&&message===lastProgressMessage)return;lastProgress=Date.now();lastProgressMessage=message;pendingProgress=pendingProgress.then(()=>updateJob(root,job.id,{stage:publicValue(message),message:publicValue(message),progress:normalizedProgress(progress??{phase:publicValue(message)})})).catch(()=>{});
   },onCheckpoint:async record=>{
-    latest=await saveContent(root,{...record,processingMode:input.processing,sourceUrl:job.input.url},stage);await updateJob(root,job.id,{title:record.title,contentId:latest.contentId});
+    latest=await saveContent(root,{...record,processingMode:input.processing,sourceUrl:job.input.url},stage,{checkpoint:true});await updateJob(root,job.id,{title:record.title,contentId:latest.contentId});
   }};
   try {
   let record:CapturedContent;

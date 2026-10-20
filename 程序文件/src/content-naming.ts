@@ -106,7 +106,7 @@ function previewPhotoNumber(asset: AssetWithCapturePath, record: CapturedContent
   const match = /^images\/(\d{3,})-preview$/.exec(asset.id), number = match ? Number(match[1]) : 0;
   return Number.isSafeInteger(number) && number > 0 ? number : undefined;
 }
-function candidatePath(asset: AssetWithCapturePath, record: CapturedContent, capturePath: string, ordinal: number, pdfOrdinal: number): string {
+function legacyCandidatePath(asset: AssetWithCapturePath, record: CapturedContent, capturePath: string, ordinal: number, pdfOrdinal: number): string {
   const extension = extensionFor(asset, capturePath);
   if (asset.role === "pdf") return safeFilename(pdfOrdinal === 1 ? `阅读${extension || ".pdf"}` : `阅读 (${pdfOrdinal})${extension || ".pdf"}`, "阅读.pdf", 72);
   const preview = previewPhotoNumber(asset, record), category = preview === undefined ? categoryByRole[asset.role] : "图片"; const part = partInfo(record, asset.partId).directory;
@@ -116,6 +116,17 @@ function candidatePath(asset: AssetWithCapturePath, record: CapturedContent, cap
   const mainStem=["video","audio"].includes(asset.role)?`${roleName[asset.role]}${String(ordinal).padStart(3,"0")}-${safeFilename(title,"未命名资料",32)}`:stem;
   const filename = safeFilename(`${mainStem}${extension}`, mainStem, 72);
   return [category, part, filename].filter(Boolean).join("/");
+}
+function candidatePath(asset: AssetWithCapturePath, record: CapturedContent, capturePath: string, ordinal: number, pdfOrdinal: number): string {
+  if(record.storageVersion!==2)return legacyCandidatePath(asset,record,capturePath,ordinal,pdfOrdinal);
+  if(asset.id.startsWith("original-history-")&&asset.path?.startsWith("历史版本/原件/"))return asset.path;
+  if(asset.id.startsWith("pdf-history-")&&asset.path?.startsWith("历史版本/阅读/"))return asset.path;
+  if(asset.id==="reading-pdf")return "阅读.pdf";
+  if(asset.id==="legacy-pdf")return "历史版本/阅读/原始文章.pdf";
+  const raw:Record<string,string>={"wechat-source-html":"原始页面.html","wechat-source-markdown":"采集正文.md","wechat-source-manifest":"采集清单.json"};
+  if(raw[asset.id])return `原始资料/采集记录/${raw[asset.id]}`;
+  const category=asset.provenance==="original"||asset.provenance==="platform_subtitle"?"原始资料":asset.role==="source"||asset.role==="reading"?".内部":"处理结果";
+  return `${category}/${legacyCandidatePath(asset,record,capturePath,ordinal,pdfOrdinal)}`;
 }
 function distinctPath(candidate: string, used: Set<string>): string {
   const key = candidate.toLocaleLowerCase();

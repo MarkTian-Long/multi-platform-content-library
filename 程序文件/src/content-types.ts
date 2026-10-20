@@ -37,9 +37,12 @@ export interface CapturedContent {
   kind: ContentKind; markdown: string; assets: ContentAsset[]; parts?: ContentPart[];
   warnings: string[]; coverage?: Record<string, string>;
   processingMode?: ProcessingMode;
+  /** Opt-in storage layout; IDs and capture paths remain unchanged. */
+  storageVersion?: 2;
 }
 export interface ContentContext {
   runtimeRoot: string; directory: string; signal?: AbortSignal;
+  libraryRoot?: string;
   processing?: ProcessingMode;
   onProgress?: (message: string, progress?: ContentProgress) => void; existing?: CapturedContent;
   /** Await after each durable asset so cancellation/crashes retain a readable checkpoint. */

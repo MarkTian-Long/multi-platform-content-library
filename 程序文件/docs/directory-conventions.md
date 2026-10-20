@@ -1,26 +1,29 @@
 # 目录与文件规范
 
+2026-10-16正式存储已升级，当前项目树、单条资料树和兼容边界见[存储目录说明](storage-layout.md)，本轮结果见[验收](reviews/2026-10-16-storage-unification.md)。下文历史画质示例中的`图片/`、`视频/`在第二版布局中位于`原始资料/`内；稳定ID和实际原件格式不变。
+
 根README是用户入口，`程序文件/docs/`是说明与验收主位置。历史计划保留原阶段，当前功能以`platform-support.md`及总控升级计划末节为准。
 
 ## 根目录
 
 | 路径 | 规则 |
 | --- | --- |
-| `启动多平台资料库.cmd` | 唯一日常入口；旧微信启动器放`程序文件/legacy/` |
+| `多平台资料库.exe` | 日常无控制台入口；由Windows构建生成，不提交Git |
+| `启动多平台资料库.cmd` | 旧版兼容入口，日常使用EXE；旧微信启动器放`程序文件/legacy/` |
 | `README.md`、`CHANGELOG.md` | 安装、使用和版本入口 |
 | `程序文件/` | 代码、脚本、测试、文档，以及被忽略的本机运行目录 |
 | `资料库/` | 正式资料、items、queue.json、staging、history、组织与校订记录 |
 | `文章库/` | 微信兼容存储，保留已有内容 |
-| `版本备份/` | 本地源码恢复ZIP，带文件哈希并回读核验 |
+| `版本备份/` | 完整资料/源码ZIP及快速回退材料，带文件哈希并回读核验 |
 | `.git/`、`.gitignore`、`.gitattributes` | Git历史、同步排除和换行规则 |
 
 不在根目录堆放下载样本、截图、模型、临时脚本或重复启动器。独立实验和诊断放`程序文件/logs/<用途或日期>/`，完成后按实际归属清理。
 
 ## 程序目录与GitHub同步
 
-`src/`、`scripts/`、`tests/`、`docs/`、`legacy/`、窗口脚本、package/lock/tsconfig和本目录README随源码同步。模块名称、src到dist路径、兼容入口和环境变量属于程序接口，不能为中文命名随意改动。
+`src/`、`scripts/`、`tests/`、`docs/`、`legacy/`、`launcher/`、窗口脚本、package/lock/tsconfig和本目录README随源码同步。模块名称、src到dist路径、兼容入口和环境变量属于程序接口，不能为中文命名随意改动。
 
-`node_modules/`、`dist/`、`tools/`、`.venv-content/`、`logs/`、日志归档、专用浏览器目录、`.content-settings.json`、`.content-parser-auth.json`和环境文件仅留本机。下载源码后以`npm ci`、build和工具准备重建运行目录。正式资料、账号、模型和源码恢复ZIP不进入GitHub提交；GitHub源码同步不等于用户资料备份。
+根目录`多平台资料库.exe`及程序目录`node_modules/`、`dist/`、`tools/`、`.venv-content/`、`logs/`、日志归档、专用浏览器目录、`.content-settings.json`、`.content-parser-auth.json`和环境文件仅留本机。下载源码后以`npm ci`、build和工具准备重建运行目录。正式资料、账号、模型和源码恢复ZIP不进入GitHub提交；GitHub源码同步不等于用户资料备份。
 
 `.cmd`和`.ps1`工作文件使用CRLF；PowerShell 5.1中文脚本保留UTF-8 BOM。其他文本源码按Git换行规则存储；不要为格式规则改写资产字节、原件扩展名或机器原稿。
 

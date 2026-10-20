@@ -1,3 +1,5 @@
+import { unifiedArticleRoot, unifiedArticleRecords, saveUnifiedArticle, syncUnifiedArticleManifest } from "./article-unified.js";
+import { containedFile, atomicJson, writableFile } from "./content-library.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -9,7 +11,7 @@ import { renderArticleMarkdown } from "./markdown.js";
 import { downloadArticleVideos, renderVideoMarkdown, sanitizeArticleVideoHtml, type SavedArticleVideo, type VideoFetcher } from "./article-videos.js";
 
 export interface ArticleMetadata { articleId: string; title: string; sourceUrl: string; status: CaptureStatus; extractedAt: string; directory?: string; }
-export interface ArticleManifest extends ArticleMetadata { contentHash: string; images?: SavedArticleImage[]; videos?: SavedArticleVideo[]; pdf?: PdfStatus; lastPdfError?: string; markdownFile?: string; }
+export interface ArticleManifest extends ArticleMetadata { contentHash: string; images?: SavedArticleImage[]; videos?: SavedArticleVideo[]; pdf?: PdfStatus; lastPdfError?: string; markdownFile?: string; htmlFile?: string; contentId?: string; articleIds?: string[]; }
 export interface SaveArticleOptions { fetcher?: ImageFetcher; videoFetcher?: VideoFetcher; }
 
 export function articleDirectoryName(record: Pick<ArticleRecord, "title" | "extractedAt">, copy = 1): string {
@@ -48,6 +50,12 @@ async function directoryFor(root: string, record: ArticleRecord, articleId: stri
 }
 
 export async function saveArticle(root: string, record: ArticleRecord, options: SaveArticleOptions = {}): Promise<{ articleId: string; directory: string; manifest: ArticleManifest }> {
+  const unified=await unifiedArticleRoot(root);
+  if(unified)return saveUnifiedArticle(unified,record,options,saveLegacyArticle);
+  return saveLegacyArticle(root,record,options);
+}
+
+async function saveLegacyArticle(root: string, record: ArticleRecord, options: SaveArticleOptions = {}): Promise<{ articleId: string; directory: string; manifest: ArticleManifest }> {
   const { id, contentHash } = idFor(record);
   await fs.mkdir(root, { recursive: true });
   const selected = await directoryFor(root, record, id);
@@ -98,20 +106,20 @@ export async function saveArticle(root: string, record: ArticleRecord, options: 
   } catch (error) { await fs.rm(temp, { recursive: true, force: true }).catch(() => {}); throw error; }
 }
 
-export async function writeArticleManifest(directory: string, manifest: ArticleManifest): Promise<void> { await fs.writeFile(path.join(directory, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8"); }
+export async function writeArticleManifest(directory: string, manifest: ArticleManifest): Promise<void> { await syncUnifiedArticleManifest(directory,manifest); await atomicJson(await writableFile(directory,"manifest.json"),manifest); }
 
 async function records(root: string): Promise<Array<{ directory: string; manifest: ArticleManifest }>> {
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-  const result: Array<{ directory: string; manifest: ArticleManifest }> = [];
+  const result: Array<{ directory: string; manifest: ArticleManifest }> = await unifiedArticleRecords(root);
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
     const directory = path.resolve(root, entry.name);
     if (!isPathWithin(root, directory)) continue;
     try { result.push({ directory, manifest: JSON.parse(await fs.readFile(path.join(directory, "manifest.json"), "utf8")) as ArticleManifest }); } catch { }
   }
-  return result.sort((a, b) => b.manifest.extractedAt.localeCompare(a.manifest.extractedAt));
+  return result.filter((item,index)=>result.findIndex(other=>other.manifest.articleId===item.manifest.articleId)===index).sort((a, b) => b.manifest.extractedAt.localeCompare(a.manifest.extractedAt));
 }
 
 export async function findArticles(root: string, query: string): Promise<ArticleMetadata[]> { const needle = query.toLowerCase(); return (await records(root)).map(({ directory, manifest }) => ({ ...manifest, directory })).filter((item) => !needle || `${item.title} ${item.sourceUrl}`.toLowerCase().includes(needle)); }
 export async function findArticleDirectory(root: string, articleId: string): Promise<string | undefined> { return (await records(root)).find(({ manifest }) => manifest.articleId === articleId)?.directory; }
-export async function readArticle(root: string, articleId: string): Promise<{ ok: true; markdown: string; manifest: ArticleManifest } | { ok: false; reason: string }> { if (!/^[a-f0-9]{24}$/.test(articleId)) return { ok: false, reason: "文章标识无效" }; const found = (await records(root)).find(({ manifest }) => manifest.articleId === articleId); if (!found) return { ok: false, reason: "文章记录不存在或不完整" }; try { return { ok: true, markdown: await fs.readFile(path.join(found.directory, found.manifest.markdownFile ?? "article.md"), "utf8"), manifest: found.manifest }; } catch { return { ok: false, reason: "文章记录不存在或不完整" }; } }
+export async function readArticle(root: string, articleId: string): Promise<{ ok: true; markdown: string; manifest: ArticleManifest } | { ok: false; reason: string }> { if (!/^[a-f0-9]{24}$/.test(articleId)) return { ok: false, reason: "文章标识无效" }; const found = (await records(root)).find(({ manifest }) => manifest.articleId === articleId); if (!found) return { ok: false, reason: "文章记录不存在或不完整" }; try { return { ok: true, markdown: await fs.readFile(await containedFile(found.directory, found.manifest.markdownFile ?? "article.md"), "utf8"), manifest: found.manifest }; } catch { return { ok: false, reason: "文章记录不存在或不完整" }; } }

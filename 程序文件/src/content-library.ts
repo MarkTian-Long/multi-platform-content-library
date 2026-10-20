@@ -1,3 +1,4 @@
+import { selectReadingPdf } from "./content-reading.js";
 import { renderReadingPage } from "./content-render.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -115,9 +116,12 @@ async function loadManifest(directory:string):Promise<ContentManifest|undefined>
   const file=await containedFile(directory,"content.json");if((await fs.stat(file)).size>8*1024*1024)return undefined;
   const item=JSON.parse(await fs.readFile(file,"utf8")) as ContentManifest;return item.schemaVersion===1&&ID.test(item.contentId)&&Array.isArray(item.assets)&&Array.isArray(item.warnings)?item:undefined;
 }catch{return undefined;}}
-export async function saveContent(root:string,record:CapturedContent,stage:string,options:{replacePreviousFailures?:boolean}={}):Promise<ContentManifest>{
+export async function saveContent(root:string,record:CapturedContent,stage:string,options:{replacePreviousFailures?:boolean;checkpoint?:boolean}={}):Promise<ContentManifest>{
   if(Buffer.byteLength(record.markdown,"utf8")>4*1024*1024)throw new Error("正文超过4 MiB索引上限，原始文件仍保留在工作目录");
   const contentId=contentIdentity(record);let directory=await contentDirectory(root,contentId);const previous=await loadManifest(directory);
+  const layoutFile=path.join(root,".library-layout.json");
+  const layout=record.storageVersion===2||previous?.storageVersion===2||await fs.lstat(layoutFile).then(async stat=>!stat.isSymbolicLink()&&stat.isFile()&&JSON.parse(await fs.readFile(layoutFile,"utf8")).version===2,()=>false);
+  record={...record,...(layout?{storageVersion:2 as const}:{})};
   for(const asset of record.assets)if(asset.status==="saved"&&asset.path)await containedFile(stage,asset.path);
   if(!previous){
     await ensureDirectory(path.join(root,"items"));const name=contentFolderName(record,contentId);directory=path.join(root,"items",name);
@@ -133,6 +137,15 @@ export async function saveContent(root:string,record:CapturedContent,stage:strin
       sources.set(incoming.id,source);merged.push({...incoming,bytes,sha256:await fileHash(source)});
     }else merged.push({...incoming});
   }
+  if(layout)for(const prior of previous?.assets??[]){
+    const incoming=merged.find(a=>a.id===prior.id);
+    if(prior.provenance!=="original"||prior.id.startsWith("original-history-")||!prior.path||!incoming?.sha256||incoming.sha256===prior.sha256||!await verifiedAsset(directory,prior))continue;
+    const source=await containedFile(directory,prior.path),sha=await fileHash(source),relative=`历史版本/原件/${sha.slice(0,24)}${path.extname(prior.path)}`;
+    const destination=await writableFile(directory,relative);
+    if(source!==destination)await fs.copyFile(source,destination,fs.constants.COPYFILE_EXCL).catch(async error=>{if(error.code!=="EEXIST"||await fileHash(destination)!==sha)throw error;});
+    const id=`original-history-${sha}`;
+    if(!merged.some(a=>a.id===id)){merged.push({id,role:"source",status:"saved",path:relative,capturePath:relative,provenance:"original",sha256:sha,bytes:(await fs.stat(destination)).size,label:`历史原件 ${prior.label??prior.id}`});sources.set(id,destination);}
+  }
   for(const prior of previous?.assets??[])if(!merged.some(a=>a.id===prior.id)&&!(options.replacePreviousFailures&&prior.status!=="saved")){
     if(prior.status==="saved"&&await verifiedAsset(directory,prior)){merged.push({...prior});sources.set(prior.id,await containedFile(directory,prior.path!));}
     else merged.push(prior.status!=="saved"?{...prior}:{...prior,status:"failed",reason:"已存文件缺失或完整性校验失败，请重试补充"});
@@ -141,7 +154,8 @@ export async function saveContent(root:string,record:CapturedContent,stage:strin
     const failure=record.assets.find(a=>a.id===asset.id&&a.status!=="saved")?.reason;
     asset.status="failed";asset.integrityFailed=true;asset.reason=["原始素材已变化，旧派生结果不作为本次成功产物，请重试生成",failure].filter(Boolean).join("；");changed=true;
   }}
-  const assets=planAssetNames({...record,assets:merged},previous?.namingVersion===1?previous.assets:undefined);
+  if(layout)for(const asset of merged)if(asset.id==="legacy-pdf"){asset.role="source";asset.label="历史原文章 PDF";}
+  const assets=planAssetNames({...record,assets:merged},previous?.namingVersion===1&&previous.storageVersion===record.storageVersion?previous.assets:undefined);
   const mapping=new Map<string,string>(),remoteMapping=new Map<string,string>();
   for(const asset of assets)if(asset.status==="saved"&&asset.path){
       const source=sources.get(asset.id);if(!source)throw new Error("找不到待保存的资料文件");
@@ -153,19 +167,21 @@ export async function saveContent(root:string,record:CapturedContent,stage:strin
         const temp=`${dest}.${crypto.randomUUID()}.part`;try{await fs.copyFile(source,temp);await atomicReplace(temp,dest);}finally{await fs.unlink(temp).catch(()=>{});}
       }asset.bytes=bytes;asset.sha256=sha256;
   }
+  const bodyLinks=(text:string,file:string,toRoot:boolean)=>rewriteLocalAssetLinks(text,new Map((previous?.assets??assets).filter(a=>a.path).map(a=>{const relative=path.posix.relative(path.posix.dirname(file),a.path!.replaceAll("\\","/"));return toRoot?[relative,a.path!]:[a.path!,relative];})));
   let body=record.markdown;
-  if("schemaVersion" in record&&previous?.bodyFile)body=await fs.readFile(await containedFile(directory,previous.bodyFile),"utf8");
-  if(!body&&previous?.bodyFile)body=await fs.readFile(await containedFile(directory,previous.bodyFile),"utf8");
+  if("schemaVersion" in record&&previous?.bodyFile)body=bodyLinks(await fs.readFile(await containedFile(directory,previous.bodyFile),"utf8"),previous.bodyFile,true);
+  if(!body&&previous?.bodyFile)body=bodyLinks(await fs.readFile(await containedFile(directory,previous.bodyFile),"utf8"),previous.bodyFile,true);
   body=rewriteLocalAssetLinks(body,mapping);
   let markdown=rewriteLocalAssetLinks(body,remoteMapping,{allowRemoteSources:true});const warnings=[...record.warnings];
   for(const a of assets)if(a.status==="saved"&&a.path&&["transcript","ocr"].includes(a.role)){
     try{const file=await containedFile(directory,a.path);if((await fs.stat(file)).size+Buffer.byteLength(markdown)<4*1024*1024)markdown+=`\n\n## ${a.label||a.role}（${a.provenance||"generated"}）\n\n${await fs.readFile(file,"utf8")}`;else warnings.push("派生文字超过索引上限，完整原文件已保留");}catch{}
   }
   markdown=redactText(markdown);const now=new Date().toISOString();
-  const manifest:ContentManifest={...record,assets,markdown,warnings,contentId,schemaVersion:1,namingVersion:1,status:contentStatus({...record,assets,markdown,warnings}),aliases:[...new Set([...(previous?.aliases??[]),record.sourceUrl,record.canonicalUrl])],updatedAt:now,contentHash:crypto.createHash("sha256").update(markdown).digest("hex"),markdownFile:"资料正文.md",bodyFile:"原始正文.md",readingFile:"阅读.html"};
+  const manifest:ContentManifest={...record,assets,markdown,warnings,contentId,schemaVersion:1,namingVersion:1,status:contentStatus({...record,assets,markdown,warnings}),aliases:[...new Set([...(previous?.aliases??[]),record.sourceUrl,record.canonicalUrl])],updatedAt:now,contentHash:crypto.createHash("sha256").update(markdown).digest("hex"),markdownFile:layout?"处理结果/资料正文.md":"资料正文.md",bodyFile:layout?"原始资料/正文.md":"原始正文.md",readingFile:"阅读.html"};
   if(Buffer.byteLength(JSON.stringify(manifest))>8*1024*1024)throw new Error("资料清单超过8 MiB上限，文件已保留");
-  if(previous&&previous.contentHash!==manifest.contentHash)await atomicJson(await writableFile(directory,`versions/${previous.updatedAt.replace(/[:.]/g,"-")}.json`),publicValue(previous));
-  await atomicText(await writableFile(directory,manifest.bodyFile!),body);await atomicText(await writableFile(directory,manifest.markdownFile),markdown);await atomicText(await writableFile(directory,manifest.readingFile),renderContentHtml(manifest,markdown));
+  if(previous&&!options.checkpoint&&previous.contentHash!==manifest.contentHash)await atomicJson(await writableFile(directory,`${layout?"历史版本/清单":"versions"}/${previous.updatedAt.replace(/[:.]/g,"-")}.json`),publicValue(previous));
+  const physical=(text:string,file:string)=>rewriteLocalAssetLinks(text,new Map(assets.filter(a=>a.path).map(a=>[a.path!,path.posix.relative(path.posix.dirname(file),a.path!.replaceAll("\\","/"))])));
+  await atomicText(await writableFile(directory,manifest.bodyFile!),physical(body,manifest.bodyFile!));await atomicText(await writableFile(directory,manifest.markdownFile),physical(markdown,manifest.markdownFile));await atomicText(await writableFile(directory,manifest.readingFile),renderContentHtml(manifest,markdown));
   await atomicJson(await writableFile(directory,"content.json"),manifest);return manifest;
 }
 export async function listManifests(root:string):Promise<Array<{directory:string;manifest:ContentManifest}>>{
@@ -179,7 +195,7 @@ export async function findContent(root:string,query=""):Promise<ContentListItem[
   const needle=query.toLocaleLowerCase(),result:ContentListItem[]=[];
   for(const {directory,manifest:m} of await listManifests(root)){
     if(needle&&!`${m.title} ${m.author??""} ${m.canonicalUrl} ${m.markdown}`.toLocaleLowerCase().includes(needle))continue;
-    const media=m.assets.find(a=>a.role==="video"&&a.status==="saved"),audio=m.assets.find(a=>a.role==="audio"&&a.status==="saved"),pdf=m.assets.find(a=>a.role==="pdf"&&a.status==="saved"),original=m.platform==="local"?m.assets.find(a=>a.provenance==="original"&&a.status==="saved"):undefined;
+    const media=m.assets.find(a=>a.role==="video"&&a.status==="saved"),audio=m.assets.find(a=>a.role==="audio"&&a.status==="saved"),pdf=await (async()=>{const candidates=[...m.assets];for(;;){const candidate=selectReadingPdf(candidates);if(!candidate)return undefined;if(await verifiedAsset(directory,candidate))return candidate;candidates.splice(candidates.indexOf(candidate),1);}})(),original=m.platform==="local"?m.assets.find(a=>a.provenance==="original"&&a.status==="saved"):undefined;
     const readingPath=await containedFile(directory,m.readingFile).catch(()=>undefined);if(!readingPath)continue;
     const transcript=m.assets.filter(a=>["transcript","ocr"].includes(a.role)&&a.status==="saved"&&a.path).sort((a,b)=>Number(b.provenance==="user_edited")-Number(a.provenance==="user_edited")||Number(b.role==="transcript")-Number(a.role==="transcript"))[0];
     result.push({contentId:m.contentId,title:m.title,displayTitle:contentDisplayTitle(m.title),platform:m.platform,kind:m.kind,status:m.status,directory,readingPath,pdfPath:pdf?.path?await containedFile(directory,pdf.path).catch(()=>undefined):undefined,videoPath:media?.path?await containedFile(directory,media.path).catch(()=>undefined):undefined,audioPath:audio?.path?await containedFile(directory,audio.path).catch(()=>undefined):undefined,originalPath:original?.path?await containedFile(directory,original.path).catch(()=>undefined):undefined,transcriptPath:transcript?.path?await containedFile(directory,transcript.path).catch(()=>undefined):undefined,sourceUrl:publicUrl(m.canonicalUrl),capturedAt:m.capturedAt});

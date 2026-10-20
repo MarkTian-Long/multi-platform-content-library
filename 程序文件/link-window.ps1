@@ -12,6 +12,24 @@ class LinkWindowListItem {
 $ErrorActionPreference = 'Stop'
 $startupStage = '初始化窗口'
 try {
+  if (-not $NoShow) {
+    $startupStage = '脱离启动控制台'
+    # Hiding a Windows Terminal window does not detach its client process.
+    # Detach before showing the GUI so closing the terminal cannot terminate it.
+    Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+namespace ContentLibrary {
+  public static class NativeConsole {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool FreeConsole();
+  }
+}
+"@
+    if (-not [ContentLibrary.NativeConsole]::FreeConsole()) {
+      throw (New-Object ComponentModel.Win32Exception([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
+    }
+  }
+  $startupStage = '初始化窗口'
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
   [Windows.Forms.Application]::EnableVisualStyles()
