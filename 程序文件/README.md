@@ -51,4 +51,6 @@ node dist/link-cli.js youtube-network auto
 
 原生入口与关闭控制台后的生命周期回归使用独占临时目录、离屏窗口和私有CLI。验证时依次确认无控制台、UI响应、正常关闭以及测试进程退出；保留全部行为断言。Windows下目录清理使用`await fs.promises.rm`和有界重试，并核对目标确实位于本次logs临时根内，避免同步删除阻塞测试收尾。不得清理用户窗口或其他会话进程。
 
+真实库的按钮读回使用`tests/link-window-readback.ps1 -ProjectRoot <项目绝对路径>`，默认按已有HTML/PDF/全文/识别稿能力选择公众号样本；可用`ContentPrefix`、`ExpectedCount`、`ExpectedClosingText`及`ExpectedTailText`指定本次核验，样本标识和原文不写进公共脚本。脚本只允许list/read/details，拦截外部打开及队列处理，比较正式文件清单、元数据和JSON哈希，再生成离屏截图。调整按钮绑定、全文语义或布局时复用；普通文档更新无需启动真实窗口或处理媒体。源码发布、新进程加载和用户原有窗口重开分别核验。
+
 2026-10-20发布前复验曾连续复现原生窗口测试在`rmSync`清理阶段报EPERM；切换到上述现有异步清理方式后，相关四项回归通过。仅修测试收尾，不改应用窗口行为。下次修改启动方式、后台进程或窗口关闭流程时复用这些测试；完整证据和当前待办见[本轮收口](docs/reviews/2026-10-16-storage-unification.md#2026-10-20-发布复核与沉淀)。
