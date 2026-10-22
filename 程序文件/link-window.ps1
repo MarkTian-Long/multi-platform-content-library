@@ -84,6 +84,7 @@ $form.BackColor = [Drawing.ColorTranslator]::FromHtml('#F4F6F8')
 $form.ForeColor = [Drawing.ColorTranslator]::FromHtml('#223044')
 $form.AutoScaleMode = 'Dpi'
 $form.AutoScaleDimensions = New-Object Drawing.Size(96, 96)
+$form.KeyPreview = $true
 
 function Add-LinkLabel([string]$Text, [int]$X, [int]$Y, [int]$Width = 0, [int]$Height = 0) {
   $control = New-Object Windows.Forms.Label
@@ -125,6 +126,7 @@ $title = Add-LinkLabel '多平台资料库' 22 16 300 30
 $title.Font = New-Object Drawing.Font('Microsoft YaHei UI', 18, [Drawing.FontStyle]::Bold)
 $hint = Add-LinkLabel '把链接、文件和文字稿保存到本机；按需处理，随时离线阅读。' 24 48 1060 24
 $hint.ForeColor = [Drawing.Color]::DimGray
+$hint.AutoEllipsis = $true
 $newTaskLink = New-Object Windows.Forms.LinkLabel
 $newTaskLink.Text = '新建采集 ›'
 $newTaskLink.Location = New-Object Drawing.Point(1010, 48)
@@ -306,23 +308,38 @@ $openFolderButton.Enabled = $false
 $openSourceButton = Add-LinkButton '打开来源' 408 194 88 32
 $openSourceButton.Parent = $libraryGroup
 $openSourceButton.Enabled = $false
-$exportButton = Add-LinkButton '导出资料包' 504 194 100 32
-$exportButton.Parent = $libraryGroup
-$exportButton.Enabled = $false
 $importButton = Add-LinkButton '导入本地文件' 620 194 116 32
 $importButton.Parent = $libraryGroup
 $openTranscriptButton = Add-LinkButton '打开文字稿' 12 232 110
 $openTranscriptButton.Parent = $libraryGroup
-$editTranscriptButton = Add-LinkButton '校订文字稿' 130 232 110
-$editTranscriptButton.Parent = $libraryGroup
-$detailsButton = Add-LinkButton '结果详情' 248 232 100
-$detailsButton.Parent = $libraryGroup
-$resolveMissingButton = Add-LinkButton '补充 / 处理缺项' 356 232 128
-$resolveMissingButton.Parent = $libraryGroup
-$organizeButton = Add-LinkButton '标签与收藏' 492 232 110
-$organizeButton.Parent = $libraryGroup
-$zipButton = Add-LinkButton '导出 ZIP' 610 232 100
-$zipButton.Parent = $libraryGroup
+$openTranscriptButton.AccessibleName = '打开整篇文字稿'
+$readingActionLabel = Add-LinkLabel '阅读' 12 194 40 24
+$readingActionLabel.Parent = $libraryGroup
+$readingActionLabel.ForeColor = [Drawing.Color]::DimGray
+$manageButton = Add-LinkButton '管理资料 ▾' 60 232 116
+$manageButton.Parent = $libraryGroup
+$manageButton.AccessibleDescription = '查看保存详情、标签与收藏、补充处理和校订识别稿。'
+$manageMenu = New-Object Windows.Forms.ContextMenuStrip
+$manageMenu.ShowImageMargin = $false
+$manageMenu.Font = $form.Font
+$detailsButton = New-Object Windows.Forms.ToolStripMenuItem('结果详情')
+$organizeButton = New-Object Windows.Forms.ToolStripMenuItem('标签与收藏')
+$resolveMissingButton = New-Object Windows.Forms.ToolStripMenuItem('补充 / 处理缺项')
+$editTranscriptButton = New-Object Windows.Forms.ToolStripMenuItem('校订识别稿 / 转写稿')
+$editTranscriptButton.ToolTipText = '校订图片识别、音视频转写文字；整篇文章请用“打开文字稿”。'
+$manageMenu.Items.AddRange([Windows.Forms.ToolStripItem[]]@($detailsButton, $organizeButton, $resolveMissingButton, (New-Object Windows.Forms.ToolStripSeparator), $editTranscriptButton))
+$exportMenuButton = Add-LinkButton '导出 ▾' 184 232 100
+$exportMenuButton.Parent = $libraryGroup
+$exportMenuButton.AccessibleDescription = '将当前资料导出为资料包文件夹或 ZIP。'
+$exportMenu = New-Object Windows.Forms.ContextMenuStrip
+$exportMenu.ShowImageMargin = $false
+$exportMenu.Font = $form.Font
+$exportButton = New-Object Windows.Forms.ToolStripMenuItem('导出资料包')
+$zipButton = New-Object Windows.Forms.ToolStripMenuItem('导出 ZIP')
+$exportMenu.Items.AddRange([Windows.Forms.ToolStripItem[]]@($exportButton, $zipButton))
+$secondaryActionLabel = Add-LinkLabel '整理' 12 232 40 24
+$secondaryActionLabel.Parent = $libraryGroup
+$secondaryActionLabel.ForeColor = [Drawing.Color]::DimGray
 $favoritesOnly = New-Object Windows.Forms.CheckBox
 $favoritesOnly.Text = '只看收藏'
 $favoritesOnly.Parent = $libraryGroup
@@ -400,53 +417,72 @@ $storageReportLabel.ForeColor = [Drawing.Color]::DimGray
 $script:linkStoragePlanId = ''
 $script:linkStorageBytes = 0
 
+function Get-LinkUiScale {
+  return [Math]::Max(1.0, [Math]::Max(($form.Font.SizeInPoints / 10.0), ($form.CurrentAutoScaleDimensions.Width / 96.0)))
+}
 function Set-LinkLibraryLayout {
-  $innerWidth = [Math]::Max(400, $libraryGroup.ClientSize.Width - 24)
-  $searchWidth = [Math]::Max(200, $innerWidth - 435)
-  $searchBox.Location = New-Object Drawing.Point -ArgumentList @([int]12, [int]28)
-  $searchBox.Size = New-Object Drawing.Size -ArgumentList @([int]$searchWidth, [int]30)
-  $searchLabel.Location = New-Object Drawing.Point -ArgumentList @([int](20 + $searchWidth), [int]34)
-  $platformLabel.Location = New-Object Drawing.Point -ArgumentList @([int](93 + $searchWidth), [int]34)
-  $platformCombo.Location = New-Object Drawing.Point -ArgumentList @([int](135 + $searchWidth), [int]29)
-  $searchButton.Location = New-Object Drawing.Point -ArgumentList @([int](271 + $searchWidth), [int]27)
-  $allButton.Location = New-Object Drawing.Point -ArgumentList @([int](351 + $searchWidth), [int]27)
-  $actionY = [Math]::Max(140, $libraryGroup.ClientSize.Height - 90)
-  $libraryList.Location = New-Object Drawing.Point -ArgumentList @([int]12, [int]68)
-  $libraryList.Size = New-Object Drawing.Size -ArgumentList @([int]$innerWidth, [int]($actionY - 80))
-  $actionX = 12
+  $scale = Get-LinkUiScale
+  $pad = [int][Math]::Round(12 * $scale)
+  $gap = [int][Math]::Round(8 * $scale)
+  $buttonHeight = [int][Math]::Round(34 * $scale)
+  $innerWidth = [Math]::Max(400, $libraryGroup.ClientSize.Width - 2 * $pad)
+  $searchY = [int][Math]::Round(28 * $scale)
+  $searchWidth = [Math]::Max(160 * $scale, $innerWidth - 442 * $scale)
+  $searchLabel.SetBounds($pad, ($searchY + 5 * $scale), (68 * $scale), (24 * $scale))
+  $searchBox.SetBounds(($pad + 72 * $scale), $searchY, $searchWidth, (30 * $scale))
+  $filterX = $searchBox.Right + $gap
+  $platformLabel.SetBounds($filterX, ($searchY + 5 * $scale), (36 * $scale), (24 * $scale))
+  $platformCombo.SetBounds(($filterX + 36 * $scale), $searchY, (128 * $scale), (30 * $scale))
+  $searchButton.SetBounds(($platformCombo.Right + $gap), ($searchY - $scale), (76 * $scale), $buttonHeight)
+  $allButton.SetBounds(($searchButton.Right + $gap), ($searchY - $scale), (76 * $scale), $buttonHeight)
+  $actionY = $libraryGroup.ClientSize.Height - $pad - 2 * $buttonHeight - $gap
+  $listY = [int][Math]::Round(72 * $scale)
+  $libraryList.SetBounds($pad, $listY, $innerWidth, ([Math]::Max((100 * $scale), ($actionY - $listY - $pad))))
+  $readingActionLabel.SetBounds($pad, ($actionY + 6 * $scale), (40 * $scale), (24 * $scale))
+  $actionX = $pad + 48 * $scale
   foreach ($spec in @(
-    @($openReadingButton, 116), @($openPdfButton, 100), @($openVideoButton, 100),
-    @($openFolderButton, 100), @($openSourceButton, 100), @($exportButton, 116), @($importButton, 124)
+    @($openReadingButton, 116), @($openPdfButton, 100), @($openTranscriptButton, 116),
+    @($openVideoButton, 100), @($openFolderButton, 100), @($openSourceButton, 100)
   )) {
-    $spec[0].Location = New-Object Drawing.Point -ArgumentList @([int]$actionX, [int]$actionY)
-    $spec[0].Size = New-Object Drawing.Size -ArgumentList @([int]$spec[1], [int]32)
-    $actionX += $spec[1] + 4
+    $spec[0].SetBounds($actionX, $actionY, ($spec[1] * $scale), $buttonHeight)
+    $actionX = $spec[0].Right + $gap
   }
-  $actionX=12
-  foreach ($spec in @(@($openTranscriptButton,110),@($editTranscriptButton,110),@($detailsButton,100),@($resolveMissingButton,136),@($organizeButton,110),@($zipButton,100))) {
-    $spec[0].SetBounds($actionX,($actionY+38),$spec[1],32)
-    $actionX += $spec[1]+4
-  }
-  $favoritesOnly.Location=New-Object Drawing.Point(($innerWidth-104),($actionY+44))
+  $secondaryY = $actionY + $buttonHeight + $gap
+  $secondaryActionLabel.SetBounds($pad, ($secondaryY + 6 * $scale), (40 * $scale), (24 * $scale))
+  $manageButton.SetBounds(($pad + 48 * $scale), $secondaryY, (124 * $scale), $buttonHeight)
+  $exportMenuButton.SetBounds(($manageButton.Right + $gap), $secondaryY, (100 * $scale), $buttonHeight)
+  $importButton.SetBounds(($exportMenuButton.Right + $gap), $secondaryY, (132 * $scale), $buttonHeight)
+  $favoritesOnly.SetBounds(($libraryGroup.ClientSize.Width - $pad - 112 * $scale), ($secondaryY + 6 * $scale), (112 * $scale), (24 * $scale))
+  $libraryList.TabIndex = 6
+  $readingIndex = 7
+  foreach ($control in @($openReadingButton,$openPdfButton,$openTranscriptButton,$openVideoButton,$openFolderButton,$openSourceButton,$manageButton,$exportMenuButton,$importButton,$favoritesOnly)) { $control.TabIndex = $readingIndex; $readingIndex++ }
 }
 $libraryGroup.add_Resize({ Set-LinkLibraryLayout })
 Set-LinkLibraryLayout
 Set-LinkQueueLayout
 
-$assetStatusLabel = Add-LinkLabel '产物状态：选择资料后显示正文、图片、视频、字幕、转写、OCR 等逐项结果。' 24 662 1088 24
+$assetStatusLabel = Add-LinkLabel '选择一条资料后，可离线阅读整篇文章或查看保存详情。' 24 662 1088 24
 $assetStatusLabel.Anchor = 'Bottom, Left, Right'
 $assetStatusLabel.ForeColor = [Drawing.Color]::DimGray
+$assetStatusLabel.AutoEllipsis = $true
 $status = Add-LinkLabel '就绪：粘贴链接后加入队列。' 24 690 1088 42
 $status.Anchor = 'Bottom, Left, Right'
 $status.AutoEllipsis = $true
 $tooltip = New-Object Windows.Forms.ToolTip
 $tooltip.SetToolTip($inputBox, '支持多行粘贴。保存链接会立即入队并处理；仅加入队列则暂存。')
 $tooltip.SetToolTip($importButton, '使用采集任务页当前选项导入；原件 + 文字稿会为原图识别文字，完整处理还会抽取视频关键帧。')
-$tooltip.SetToolTip($resolveMissingButton, '使用采集任务页当前选项补充处理，复用已经核验的原件。')
+$resolveMissingButton.ToolTipText = '使用采集任务页当前选项补充处理，复用已经核验的原件。'
+$tooltip.SetToolTip($manageButton, '查看结果详情、整理标签收藏、补充缺项或校订识别稿。')
+$tooltip.SetToolTip($exportMenuButton, ('导出副本保存在：' + (Join-Path $libraryRoot 'exports')))
 . (Join-Path $PSScriptRoot 'link-library-dialogs.ps1')
 
 function Set-LinkWorkspaceLayout {
-  $mainTabs.SetBounds(24, 86, ($form.ClientSize.Width - 48), ($form.ClientSize.Height - 196))
+  $scale = Get-LinkUiScale
+  $manageMenu.Font = $form.Font
+  $exportMenu.Font = $form.Font
+  $title.SetBounds((24 * $scale), (16 * $scale), ($form.ClientSize.Width - 48 * $scale), (32 * $scale))
+  $hint.SetBounds((24 * $scale), (52 * $scale), ($form.ClientSize.Width - 196 * $scale), (24 * $scale))
+  $mainTabs.SetBounds((24 * $scale), (86 * $scale), ($form.ClientSize.Width - 48 * $scale), ($form.ClientSize.Height - 196 * $scale))
   $libraryGroup.SetBounds(12, 12, ($libraryTab.ClientSize.Width - 24), ($libraryTab.ClientSize.Height - 24))
   $captureGroup.SetBounds(12, 12, ($taskTab.ClientSize.Width - 24), 124)
   $queueGroup.SetBounds(12, 148, ($taskTab.ClientSize.Width - 24), ([Math]::Max(180, $taskTab.ClientSize.Height - 160)))
@@ -456,10 +492,10 @@ function Set-LinkWorkspaceLayout {
   $processingCombo.SetBounds(16,90,220,28)
   $inputHint.SetBounds(248, 94, ($captureGroup.Width - 264), 24)
   $inputHint.Text='选择需要的产物；旧任务沿用原选项。导入文件也使用此选项。'
-  $assetStatusLabel.SetBounds(24, ($form.ClientSize.Height - 96), ($form.ClientSize.Width - 48), 44)
+  $assetStatusLabel.SetBounds((24 * $scale), ($form.ClientSize.Height - 96 * $scale), ($form.ClientSize.Width - 48 * $scale), (44 * $scale))
   $assetStatusLabel.Visible = $mainTabs.SelectedTab -eq $libraryTab
-  $status.SetBounds(24, ($form.ClientSize.Height - 46), ($form.ClientSize.Width - 48), 36)
-  $newTaskLink.Location = New-Object Drawing.Point(($form.ClientSize.Width - 146), 48)
+  $status.SetBounds((24 * $scale), ($form.ClientSize.Height - 46 * $scale), ($form.ClientSize.Width - 48 * $scale), (36 * $scale))
+  $newTaskLink.Location = New-Object Drawing.Point(($form.ClientSize.Width - 146 * $scale), (52 * $scale))
   $doctorButton.SetBounds(16, 90, 110, 38)
   $installButton.SetBounds(138, 90, 158, 38)
   $loginPlatformCombo.SetBounds(310, 94, 108, 30)
@@ -502,12 +538,14 @@ function Set-LinkControls {
   $openSourceButton.Text = if ($selectedItem.platform -eq 'local') { '打开原件' } else { '打开来源' }
   $openSourceButton.Enabled = $selected -and ([string]$selectedItem.sourceUrl -match '^https?://' -or -not [string]::IsNullOrWhiteSpace([string]$selectedItem.originalPath))
   $exportButton.Enabled = $selected -and -not $busy
-  $openTranscriptButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.transcriptPath)
-  $editTranscriptButton.Enabled = $openTranscriptButton.Enabled -and -not $busy -and -not $workerBusy
+  $openTranscriptButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.textPath)
+  $editTranscriptButton.Enabled = $selected -and -not [string]::IsNullOrWhiteSpace([string]$selectedItem.transcriptPath) -and -not $busy -and -not $workerBusy
   $detailsButton.Enabled = $selected -and -not $busy
   $resolveMissingButton.Enabled = $selected -and -not $busy -and -not $workerBusy
   $organizeButton.Enabled = $selected -and -not $busy
   $zipButton.Enabled = $selected -and -not $busy
+  $manageButton.Enabled = $selected
+  $exportMenuButton.Enabled = $exportButton.Enabled -or $zipButton.Enabled
   $archiveJobButton.Enabled = $selectedJob -and $selectedJob.state -in @('completed','cancelled') -and -not $busy -and -not $workerBusy
   $archivedJobsButton.Enabled = -not $busy
   $importButton.Enabled = -not $busy
@@ -781,26 +819,53 @@ function Invoke-LinkRetryScheduler([DateTime]$Now = [DateTime]::UtcNow) {
 }
 function Render-LinkAssets($Item) {
   $script:linkCurrentManifest = $null
-  if ($null -eq $Item) { $assetStatusLabel.Text = '选择资料后可查看结果详情、打开文字稿，或补充处理。'; return }
-  $parts = @($(if ($Item.readingPath) { '阅读页可用' }), $(if ($Item.pdfPath) { 'PDF 可用' }), $(if ($Item.videoPath) { '视频可用' })) | Where-Object { $_ }
+  Set-LinkSelectionContext $Item
+  if ($null -eq $Item) { $assetStatusLabel.Text = '选择一条资料后，可离线阅读整篇文章或查看保存详情。'; return }
+  $parts = @($(if ($Item.readingPath) { '阅读页' }), $(if ($Item.pdfPath) { 'PDF' }), $(if ($Item.textPath) { '整篇文字稿' }), $(if ($Item.videoPath) { '视频' } elseif ($Item.audioPath) { '音频' })) | Where-Object { $_ }
   $displayTitle = if ($Item.displayTitle) { [string]$Item.displayTitle } else { [string]$Item.title }
-  $assetStatusLabel.Text = "$displayTitle`r`n$(Convert-LinkState $Item.status) · $($parts -join ' / ')"
+  $assetStatusLabel.Text = "当前资料：$displayTitle`r`n$(Convert-LinkState $Item.status) · 可打开：$($parts -join '、')"
   $tooltip.SetToolTip($assetStatusLabel, $assetStatusLabel.Text)
+}
+function Set-LinkSelectionContext($Item) {
+  if ($null -eq $Item) {
+    $form.Text = '多平台资料库'
+    $hint.Text = '资料库：' + $libraryRoot
+    $tooltip.SetToolTip($hint, $hint.Text)
+    return
+  }
+  $displayTitle = if ($Item.displayTitle) { [string]$Item.displayTitle } else { [string]$Item.title }
+  $directory = [string]$Item.directory
+  if ($directory -and -not [IO.Path]::IsPathRooted($directory)) { $directory = Join-Path $libraryRoot $directory }
+  $form.Text = $displayTitle + ' - 多平台资料库'
+  $hint.Text = '当前资料：' + $directory
+  $tooltip.SetToolTip($hint, $hint.Text)
+  foreach ($target in @(
+    @($openReadingButton, [string]$Item.readingPath, '离线阅读页（列表双击或 Enter）'),
+    @($openPdfButton, [string]$Item.pdfPath, '当前 PDF'),
+    @($openTranscriptButton, [string]$Item.textPath, '整篇文章 / 完整文字稿（列表 Ctrl+Enter）'),
+    @($openVideoButton, $(if ($Item.videoPath) { [string]$Item.videoPath } else { [string]$Item.audioPath }), '已保存的音视频'),
+    @($openFolderButton, $directory, '当前资料目录'),
+    @($openSourceButton, $(if ($Item.platform -eq 'local') { [string]$Item.originalPath } else { [string]$Item.sourceUrl }), '原始来源')
+  )) {
+    $path = [string]$target[1]
+    if ($path -and $target[0] -ne $openFolderButton -and $path -notmatch '^https?://' -and -not [IO.Path]::IsPathRooted($path)) { $path = Join-Path $directory $path }
+    $tooltip.SetToolTip($target[0], ([string]$target[2] + $(if ($path) { "`r`n" + $path } else { '：尚未生成或不可用' })))
+  }
 }
 function Render-LinkManifest($Manifest) {
   if ($null -eq $Manifest) { return }
   $script:linkCurrentManifest = $Manifest
   $assets = @($Manifest.assets)
   if ($assets.Count -eq 0) { return }
-  $parts = @($assets | ForEach-Object {
-    $label = if ($_.label) { [string]$_.label } else { [string]$_.role }
-    $roleNames = @{reading='阅读页';pdf='PDF';video='视频';image='图片';audio='音频';subtitle='字幕';transcript='转写';ocr='文字识别';source='来源'}
-    if ($roleNames.ContainsKey($label)) { $label = $roleNames[$label] }
-    "$label：$(Convert-LinkState $_.status)$(if ($_.status -ne 'saved' -and $_.reason) {'（'+[string]$_.reason+'）'})"
+  $roleNames = @{reading='阅读页';pdf='PDF';video='视频';image='图片';audio='音频';subtitle='字幕';transcript='转写稿';ocr='识别稿';source='来源附件';frame='视频画面';markdown='全文';body='全文'}
+  $groups = @($assets | Group-Object -Property role)
+  $parts = @($groups | ForEach-Object {
+    $name = if ($roleNames.ContainsKey([string]$_.Name)) { $roleNames[[string]$_.Name] } else { '其他文件' }
+    "$name $($_.Count)"
   })
   $savedCount=@($assets | Where-Object {$_.status -eq 'saved'}).Count
   $missingCount=$assets.Count-$savedCount
-  $assetStatusLabel.Text = "已保存 $savedCount 项$(if($missingCount){'，另有 '+$missingCount+' 项未就绪；点击结果详情查看原因和操作。'})`r`n" + ($parts -join '；')
+  $assetStatusLabel.Text = "当前资料：$($assets.Count) 个资源 · 已保存 $savedCount$(if($missingCount){' · 未就绪 '+$missingCount}) · 详细结果见「管理资料」`r`n" + ($parts -join ' · ')
   $tooltip.SetToolTip($assetStatusLabel, $assetStatusLabel.Text)
 }
 function Get-LinkFilteredItems($Items) {
@@ -830,15 +895,16 @@ function Render-LinkLibrary($Items) {
     }
     if ($libraryList.SelectedIndex -lt 0 -and $libraryList.Items.Count -gt 0) { $libraryList.SelectedIndex = 0 }
   } finally { $libraryList.EndUpdate() }
+  $libraryGroup.Text = "资料库 · 当前 $($libraryList.Items.Count) 条"
   if ($libraryList.SelectedItem) {
     $script:linkSelectedContentId = $libraryList.SelectedItem.ContentId
     Render-LinkAssets $libraryList.SelectedItem.Item
     if ($null -eq $script:linkJob -and $null -eq $script:linkPollJob) {
-      Start-LinkOperation @('read', $script:linkSelectedContentId) '正在读取产物状态…'
+      Start-LinkOperation @('read', $script:linkSelectedContentId) '正在读取保存情况…'
     }
   } else { $script:linkSelectedContentId = ''; Render-LinkAssets $null }
   if ($libraryList.Items.Count -eq 0) { Set-LinkStatus '没有找到资料；可清空搜索条件或先加入新任务。' }
-  else { Set-LinkStatus "已显示 $($libraryList.Items.Count) 项资料。" }
+  else { Set-LinkStatus "当前显示 $($libraryList.Items.Count) 条资料；选择一条即可打开本地文件。" }
   Set-LinkControls
 }
 function Refresh-LinkJobs {
@@ -921,9 +987,9 @@ function Complete-LinkOperation($Payload, [string]$Operation) {
     return
   }
   if ($Operation -eq 'read') {
-    if ($Payload.ok -and $script:linkSelectedContentId -eq $script:linkReadContentId) { Render-LinkManifest $Payload.manifest; Set-LinkStatus '资料已就绪；可打开阅读页、文字稿或查看结果详情。' }
-    elseif ($Payload.ok -and $script:linkSelectedContentId) { Start-LinkOperation @('read', $script:linkSelectedContentId) '正在读取产物状态…' }
-    else { Set-LinkStatus ('产物状态读取失败：' + $Payload.message); Write-LinkError $Payload.message }
+    if ($Payload.ok -and $script:linkSelectedContentId -eq $script:linkReadContentId) { Render-LinkManifest $Payload.manifest; Set-LinkStatus '选择阅读页保留原文排版；文字稿打开整篇正文。其他操作在“管理资料”和“导出”中。' }
+    elseif ($Payload.ok -and $script:linkSelectedContentId) { Start-LinkOperation @('read', $script:linkSelectedContentId) '正在读取保存情况…' }
+    else { Set-LinkStatus ('保存情况读取失败：' + $Payload.message); Write-LinkError $Payload.message }
     return
   }
   if ($Operation -eq 'video-parser') {
@@ -1005,14 +1071,15 @@ function Invoke-LinkOpen([string]$Kind) {
     $directory = if ([IO.Path]::IsPathRooted($directoryInput)) { [IO.Path]::GetFullPath($directoryInput) } else { [IO.Path]::GetFullPath((Join-Path $libraryRoot $directoryInput)) }
     $rootPrefix = [IO.Path]::GetFullPath($libraryRoot).TrimEnd('\') + '\'
     if (-not $directory.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '资料目录不在当前资料库内。' }
-    if ($Kind -eq 'folder') { Start-Process explorer.exe -ArgumentList (ConvertTo-ReaderArgument $directory); return }
-    if ($Kind -eq 'source' -and $item.platform -ne 'local') { Start-Process ([string]$item.sourceUrl); return }
-    $relative = switch ($Kind) { 'reading' { [string]$item.readingPath } 'pdf' { [string]$item.pdfPath } 'transcript' { [string]$item.transcriptPath } 'source' { [string]$item.originalPath } default { if ($item.videoPath) { [string]$item.videoPath } else { [string]$item.audioPath } } }
+    if ($Kind -eq 'folder') { Start-Process explorer.exe -ArgumentList (ConvertTo-ReaderArgument $directory); Set-LinkStatus ('已打开资料目录：' + $directory); return }
+    if ($Kind -eq 'source' -and $item.platform -ne 'local') { Start-Process ([string]$item.sourceUrl); Set-LinkStatus ('已打开原始来源：' + [string]$item.sourceUrl); return }
+    $relative = switch ($Kind) { 'reading' { [string]$item.readingPath } 'pdf' { [string]$item.pdfPath } 'transcript' { [string]$item.textPath } 'source' { [string]$item.originalPath } default { if ($item.videoPath) { [string]$item.videoPath } else { [string]$item.audioPath } } }
     if ([string]::IsNullOrWhiteSpace($relative)) { throw '该资料没有对应产物，可能尚未生成或不可用。' }
     $candidate = if ([IO.Path]::IsPathRooted($relative)) { [IO.Path]::GetFullPath($relative) } else { [IO.Path]::GetFullPath((Join-Path $directory $relative)) }
     if (-not $candidate.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and -not $candidate.StartsWith($directory.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw '产物路径不在资料目录内。' }
     if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw '对应产物文件不存在。' }
     Start-Process -FilePath $candidate
+    Set-LinkStatus ('已打开：' + [IO.Path]::GetFileName($candidate))
   } catch { Set-LinkStatus ('无法打开资料：' + $_.Exception.Message); Write-LinkError $_.Exception.Message }
 }
 
@@ -1100,16 +1167,28 @@ $libraryList.add_SelectedIndexChanged({
     $script:linkSelectedContentId = $libraryList.SelectedItem.ContentId
     Render-LinkAssets $libraryList.SelectedItem.Item
     if ($null -eq $script:linkJob -and $null -eq $script:linkPollJob) {
-      Start-LinkOperation @('read', $script:linkSelectedContentId) '正在读取产物状态…'
+      Start-LinkOperation @('read', $script:linkSelectedContentId) '正在读取保存情况…'
     }
-  }
+  } else { $script:linkSelectedContentId = ''; Render-LinkAssets $null }
   Set-LinkControls
 })
 $libraryList.add_DoubleClick({ Invoke-LinkOpen 'reading' })
+$libraryList.add_KeyDown({
+  if ($_.KeyCode -eq [Windows.Forms.Keys]::Enter) {
+    $_.SuppressKeyPress = $true
+    if ($_.Control -and $openTranscriptButton.Enabled) { Invoke-LinkOpen 'transcript' }
+    elseif (-not $_.Control -and $openReadingButton.Enabled) { Invoke-LinkOpen 'reading' }
+  }
+})
+$form.add_KeyDown({
+  if ($_.Control -and $_.KeyCode -eq [Windows.Forms.Keys]::F) { $_.SuppressKeyPress=$true; $mainTabs.SelectedTab=$libraryTab; $searchBox.Focus(); $searchBox.SelectAll() }
+})
+$manageButton.add_Click({ $manageMenu.Show($manageButton, (New-Object Drawing.Point(0, $manageButton.Height))) })
+$exportMenuButton.add_Click({ $exportMenu.Show($exportMenuButton, (New-Object Drawing.Point(0, $exportMenuButton.Height))) })
 $openReadingButton.add_Click({ Invoke-LinkOpen 'reading' })
 $openPdfButton.add_Click({ Invoke-LinkOpen 'pdf' })
 $openTranscriptButton.add_Click({Invoke-LinkOpen 'transcript'})
-$editTranscriptButton.add_Click({$item=Get-LinkSelectedItem;if($item){Start-LinkOperation @('transcript-read',[string]$item.contentId) '正在读取文字稿与校订版本…'}})
+$editTranscriptButton.add_Click({$item=Get-LinkSelectedItem;if($item){Start-LinkOperation @('transcript-read',[string]$item.contentId) '正在读取识别稿 / 转写稿与校订版本…'}})
 $detailsButton.add_Click({$item=Get-LinkSelectedItem;if($item){Start-LinkOperation @('details',[string]$item.contentId) '正在读取逐项保存结果…'}})
 $organizeButton.add_Click({$item=Get-LinkSelectedItem;if($item){Show-LinkTagEditor $item}})
 $zipButton.add_Click({$item=Get-LinkSelectedItem;if($item){Start-LinkOperation @('export-zip',[string]$item.contentId) '正在打包并核验 ZIP…'}})
@@ -1187,7 +1266,7 @@ $form.add_FormClosing({
     if ($script:linkInstallJob) { Stop-Process -Id $script:linkInstallJob.Process.Id -Force -ErrorAction SilentlyContinue; $script:linkInstallJob = $null }
   } catch {}
 })
-$form.add_FormClosed({ $linkTimer.Stop(); $linkTimer.Dispose(); $tooltip.Dispose() })
+$form.add_FormClosed({ $linkTimer.Stop(); $linkTimer.Dispose(); $tooltip.Dispose(); $manageMenu.Dispose(); $exportMenu.Dispose() })
 $form.add_Load({ Set-LinkWorkspaceLayout })
 $form.add_Resize({ Set-LinkWorkspaceLayout })
 $mainTabs.add_SelectedIndexChanged({ Set-LinkWorkspaceLayout })

@@ -38,7 +38,7 @@ export interface CapturedContent {
   warnings: string[]; coverage?: Record<string, string>;
   processingMode?: ProcessingMode;
   /** Opt-in storage layout; IDs and capture paths remain unchanged. */
-  storageVersion?: 2;
+  storageVersion?: 2 | 3;
 }
 export interface ContentContext {
   runtimeRoot: string; directory: string; signal?: AbortSignal;
@@ -61,7 +61,7 @@ export interface ContentListItem {
   displayTitle?: string;
   status: ContentStatus; directory: string; readingPath: string; pdfPath?: string;
   videoPath?: string; audioPath?: string; originalPath?: string; sourceUrl: string; capturedAt: string;
-  transcriptPath?: string; tags?: string[]; favorite?: boolean;
+  textPath?: string; transcriptPath?: string; tags?: string[]; favorite?: boolean;
 }
 export type JobState = "queued" | "running" | "paused" | "waiting" | "rate_limited" | "completed" | "partial" | "failed" | "cancelled" | "login_required";
 export interface ContentJob {

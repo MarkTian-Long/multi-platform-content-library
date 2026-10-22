@@ -1,5 +1,5 @@
 import { unifiedArticleRoot, unifiedArticleRecords, saveUnifiedArticle, syncUnifiedArticleManifest } from "./article-unified.js";
-import { containedFile, atomicJson, writableFile } from "./content-library.js";
+import { containedFile, atomicJson, writableFile, initializeDefaultLibraryLayout } from "./content-library.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -50,6 +50,7 @@ async function directoryFor(root: string, record: ArticleRecord, articleId: stri
 }
 
 export async function saveArticle(root: string, record: ArticleRecord, options: SaveArticleOptions = {}): Promise<{ articleId: string; directory: string; manifest: ArticleManifest }> {
+  await initializeDefaultLibraryLayout(root);
   const unified=await unifiedArticleRoot(root);
   if(unified)return saveUnifiedArticle(unified,record,options,saveLegacyArticle);
   return saveLegacyArticle(root,record,options);

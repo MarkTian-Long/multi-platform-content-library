@@ -25,7 +25,7 @@ $modalTimer.add_Tick({
         $box=@($dialog.Controls | Where-Object {$_ -is [Windows.Forms.TextBox]})[0]
         Assert-Upgrade ($box.Text -match '文字稿' -and $box.Text -match '本次未请求') '结果详情未显示文字稿和未请求的历史缺项'
         $script:dialogChecked=$true;$dialog.DialogResult='Cancel';$dialog.Close()
-      }elseif($script:dialogMode -eq 'edit' -and $dialog.Text -like '校订文字稿*'){
+      }elseif($script:dialogMode -eq 'edit' -and $dialog.Text -like '校订识别稿 / 转写稿*'){
         $editor=Find-UpgradeControl $dialog 'TranscriptEditor'
         $from=Find-UpgradeControl $dialog 'ReplacementFrom';$to=Find-UpgradeControl $dialog 'ReplacementTo'
         $from.Text='萨斯';$to.Text='SaaS'
@@ -56,7 +56,7 @@ function Wait-Upgrade{
   }
   if($script:dialogError){throw $script:dialogError}
 }
-function Click-Upgrade($Button){[void][Windows.Forms.Button].GetMethod('OnClick',[Reflection.BindingFlags]'NonPublic,Instance').Invoke($Button,@([EventArgs]::Empty));Wait-Upgrade}
+function Click-Upgrade($Button){$Button.PerformClick();Wait-Upgrade}
 function Modal-Upgrade([string]$Mode,$Button){$script:dialogMode=$Mode;$script:dialogChecked=$false;$modalTimer.Start();try{Click-Upgrade $Button;Assert-Upgrade $script:dialogChecked ('未进入预期对话框：'+$Mode)}finally{$modalTimer.Stop()}}
 try{
   $form.ShowInTaskbar=$false;$form.StartPosition='Manual';$form.Location=New-Object Drawing.Point(-32000,-32000);$form.Show();$form.CreateControl();Initialize-LinkWorkspace;Wait-Upgrade
@@ -65,7 +65,9 @@ try{
   foreach($size in @(@(1150,760),@(980,680))){
     $form.ClientSize=New-Object Drawing.Size($size[0],$size[1]);Set-LinkWorkspaceLayout
     [Windows.Forms.Application]::DoEvents();Set-LinkLibraryLayout
-    foreach($control in @($openTranscriptButton,$editTranscriptButton,$detailsButton,$resolveMissingButton,$organizeButton,$zipButton,$favoritesOnly)){Assert-Upgrade ($libraryGroup.ClientRectangle.Contains($control.Bounds)) ('新增资料控件越界：'+$control.Text+' '+$control.Bounds+' parent='+$libraryGroup.ClientRectangle)}
+    foreach($control in @($openTranscriptButton,$manageButton,$exportMenuButton,$importButton,$favoritesOnly)){Assert-Upgrade ($libraryGroup.ClientRectangle.Contains($control.Bounds)) ('资料操作控件越界：'+$control.Text+' '+$control.Bounds+' parent='+$libraryGroup.ClientRectangle)}
+    foreach($entry in @($editTranscriptButton,$detailsButton,$resolveMissingButton,$organizeButton)){Assert-Upgrade ($manageMenu.Items.Contains($entry)) ('管理菜单遗漏操作：'+$entry.Text)}
+    Assert-Upgrade ($exportMenu.Items.Contains($zipButton)) '导出菜单遗漏 ZIP'
   }
   $mainTabs.SelectedTab=$toolsTab;[Windows.Forms.Application]::DoEvents();Assert-Upgrade (-not $assetStatusLabel.Visible) '工具页残留资料产物横幅'
   $mainTabs.SelectedTab=$libraryTab

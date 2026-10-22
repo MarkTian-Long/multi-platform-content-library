@@ -8,10 +8,13 @@ $outputRoot = Join-Path $ProjectRoot '程序文件\logs\link-window-acceptance'
 . (Join-Path $ProjectRoot '程序文件\link-window.ps1') -ProjectRoot $ProjectRoot -NoShow
 $form.ShowInTaskbar = $false
 $form.StartPosition = 'Manual'
-$form.Location = New-Object Drawing.Point(-2000, -2000)
+$form.Location = New-Object Drawing.Point(-32000, -32000)
 $form.Show()
 
-function Save-LinkWindowShot([string]$Name, [int]$Width, [int]$Height) {
+function Save-LinkWindowShot([string]$Name, [int]$Width, [int]$Height, [single]$FontPoints = 10) {
+  $form.Font = New-Object Drawing.Font('Microsoft YaHei UI', $FontPoints)
+  $mainTabs.Font = $form.Font
+  $title.Font = New-Object Drawing.Font('Microsoft YaHei UI', (18 * $FontPoints / 10), [Drawing.FontStyle]::Bold)
   $form.ClientSize = New-Object Drawing.Size($Width, $Height)
   $form.CreateControl()
   $form.PerformLayout()
@@ -34,17 +37,22 @@ try {
     [pscustomobject]@{ id = 'shot-queued'; title = '等待中的资料'; state = 'queued'; stage = '等待'; message = '已加入队列'; createdAt = '2026-09-19T08:13:00.000Z'; updatedAt = '2026-09-19T08:13:00.000Z'; input = [pscustomobject]@{ url = 'https://example.com/queued' } }
   )
   Render-LinkLibrary @(
-    [pscustomobject]@{ contentId = 'shot-content'; title = '资料库示例：离线阅读与素材状态'; platform = 'wechat'; kind = 'article'; status = 'partial'; capturedAt = '2026-09-19T00:00:00.000Z'; directory = 'items\\shot-content' }
+    [pscustomobject]@{ contentId = 'shot-content'; title = '资料库示例：离线阅读与文件入口'; platform = 'wechat'; kind = 'article'; status = 'completed'; capturedAt = '2026-10-20T00:00:00.000Z'; directory = 'items\2026-10-20_微信_资料库示例'; readingPath = '资料库示例.html'; pdfPath = '资料库示例.pdf'; textPath = '资料库示例.md'; transcriptPath = '处理结果\图片识别稿.md'; sourceUrl = 'https://example.com/article' },
+    [pscustomobject]@{ contentId = 'shot-gallery'; title = '收藏的图片资料与手写笔记'; favorite = $true; tags = @('研究'); platform = 'local'; kind = 'gallery'; status = 'completed'; capturedAt = '2026-10-19T00:00:00.000Z'; directory = 'items\2026-10-19_本地文件_手写笔记'; readingPath = '手写笔记.html'; textPath = '手写笔记.md' },
+    [pscustomobject]@{ contentId = 'shot-video'; title = '一段视频：原件已保存，转写等待处理'; platform = 'bilibili'; kind = 'video'; status = 'partial'; capturedAt = '2026-10-18T00:00:00.000Z'; directory = 'items\2026-10-18_B站_一段视频'; videoPath = '视频\001.mp4' }
   )
-  $assetStatusLabel.Text = '产物状态：正文=已保存；PDF=已保存；视频=处理中；字幕=缺失'
+  Render-LinkManifest ([pscustomobject]@{assets=@([pscustomobject]@{role='reading';status='saved'},[pscustomobject]@{role='pdf';status='saved'}) + @(1..18 | ForEach-Object {[pscustomobject]@{role='image';status='saved'}})})
+  Set-LinkControls
+  Set-LinkStatus '选择阅读页保留原文排版；文字稿打开整篇正文。其他操作在“管理资料”和“导出”中。'
   Save-LinkWindowShot 'link-window-1150x760.png' 1150 760
   Save-LinkWindowShot 'link-window-980x680.png' 980 680
+  Save-LinkWindowShot 'link-window-125percent.png' 1225 850 12.5
   $mainTabs.SelectedTab = $taskTab
   Save-LinkWindowShot 'link-tasks-980x680.png' 980 680
   $mainTabs.SelectedTab = $toolsTab
   Save-LinkWindowShot 'link-tools-980x680.png' 980 680
   $script:linkJob = $null
-  [pscustomobject]@{ ok = $true; files = @('link-window-1150x760.png', 'link-window-980x680.png', 'link-tasks-980x680.png', 'link-tools-980x680.png') } | ConvertTo-Json -Compress
+  [pscustomobject]@{ ok = $true; files = @('link-window-1150x760.png', 'link-window-980x680.png', 'link-window-125percent.png', 'link-tasks-980x680.png', 'link-tools-980x680.png') } | ConvertTo-Json -Compress
 } finally {
   if ($linkTimer) { $linkTimer.Dispose() }
   if ($tooltip) { $tooltip.Dispose() }

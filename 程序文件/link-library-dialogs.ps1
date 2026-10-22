@@ -118,8 +118,8 @@ function Show-LinkTagEditor($Item) {
   } finally {$dialog.Dispose()}
 }
 function Show-LinkTranscriptEditor($Payload) {
-  $dialog = New-LinkDialog ('校订文字稿 · ' + [string]$Payload.title) 940 700
-  $hint = New-Object Windows.Forms.Label; $hint.Text='编辑当前稿后保存为用户校订版本。机器原稿保持不变；关闭或取消不会写入资料库。'; $hint.SetBounds(20,16,900,40); $hint.Anchor='Top, Left, Right'; $dialog.Controls.Add($hint)
+  $dialog = New-LinkDialog ('校订识别稿 / 转写稿 · ' + [string]$Payload.title) 940 700
+  $hint = New-Object Windows.Forms.Label; $hint.Text='校订图片识别或音视频转写内容。保存独立校订版本；整篇文章请从资料库点击“打开文字稿”。'; $hint.SetBounds(20,16,900,40); $hint.Anchor='Top, Left, Right'; $dialog.Controls.Add($hint)
   $tabs = New-Object Windows.Forms.TabControl; $tabs.SetBounds(20,64,900,500); $tabs.Anchor='Top, Bottom, Left, Right'
   $editPage=New-Object Windows.Forms.TabPage; $editPage.Text='校订稿'
   $originalPage=New-Object Windows.Forms.TabPage; $originalPage.Text='机器 / 平台原稿（只读）'

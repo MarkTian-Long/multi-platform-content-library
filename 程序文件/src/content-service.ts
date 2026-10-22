@@ -18,6 +18,8 @@ import { rewriteLocalAssetLinks } from "./content-paths.js";
 import { runtimeDirectory,contentRoot } from "./content-runtime.js";
 import { localDiagnostic,localDiagnosticError } from "./content-local-diagnostics.js";
 import { normalizedProgress,parseProcessingMode,requestedProcessingAsset } from "./content-processing.js";
+import { articleMarkdownBody } from "./markdown.js";
+import { documentFileName } from "./content-naming.js";
 export { runtimeDirectory,contentRoot } from "./content-runtime.js";
 export interface ServiceDeps { resolve?:(input:ContentInput,signal?:AbortSignal)=>Promise<ContentInput>; acquire?:(input:ContentInput,context:ContentContext)=>Promise<CapturedContent>;enrich?:(record:CapturedContent,context:ContentContext)=>Promise<CapturedContent>;pdf?:(directory:string,signal?:AbortSignal)=>Promise<string|undefined>; }
 
@@ -26,11 +28,14 @@ export async function generateContentPdf(directory:string,signal?:AbortSignal):P
   const abort=()=>{void browser.close().catch(()=>{});};signal?.addEventListener("abort",abort,{once:true});
   const temporary=await writableFile(directory,"阅读.pending.pdf");
   try{const manifest=JSON.parse(await fs.readFile(await containedFile(directory,"content.json"),"utf8"));
-    const page=await browser.newPage();await page.route(/^https?:\/\//,route=>route.abort());await page.goto(pathToFileURL(await containedFile(directory,manifest.readingFile||"reading.html")).toString(),{waitUntil:"load",timeout:20000});
+    const page=await browser.newPage({javaScriptEnabled:false});await page.route(/^https?:\/\//,route=>route.abort());await page.goto(pathToFileURL(await containedFile(directory,manifest.readingFile||"reading.html")).toString(),{waitUntil:"load",timeout:20000});
     await page.evaluate(()=>{document.querySelectorAll("img").forEach(image=>{image.loading="eager";});});
+    await page.waitForFunction(()=>Array.from(document.images).every(image=>image.complete),undefined,{timeout:20000});
+    const failedImages=await page.locator("img").evaluateAll(nodes=>nodes.filter(node=>(node as HTMLImageElement).naturalWidth===0).length);
+    if(failedImages)throw new Error(`${failedImages} 张本地图片加载失败，未替换现有PDF`);
     await page.pdf({path:temporary,format:"A4",printBackground:true,margin:{top:"16mm",bottom:"16mm",left:"16mm",right:"16mm"}});
     const handle=await fs.open(temporary,"r");const signature=Buffer.alloc(5);try{await handle.read(signature,0,5,0);}finally{await handle.close();}
-    if(signature.toString()!=="%PDF-")throw new Error("PDF格式校验失败");await fs.rename(temporary,await writableFile(directory,"阅读.pdf"));return "阅读.pdf";
+    if(signature.toString()!=="%PDF-")throw new Error("PDF格式校验失败");const output=manifest.storageVersion===3?documentFileName(manifest,"pdf"):"阅读.pdf";await fs.rename(temporary,await writableFile(directory,output));return output;
   }finally{signal?.removeEventListener("abort",abort);await browser.close().catch(()=>{});await fs.unlink(temporary).catch(()=>{});}
 }
 async function copyAsset(sourceDir:string,relative:string,stage:string,destination=relative,signal?:AbortSignal):Promise<void>{
@@ -48,7 +53,7 @@ async function copyAsset(sourceDir:string,relative:string,stage:string,destinati
 async function legacyRecord(root:string,legacyRoot:string,manifest:ArticleManifest,directory:string,stage:string):Promise<CapturedContent>{
   const file=await containedFile(directory,manifest.markdownFile??"article.md");
   if(manifest.contentId){const saved=JSON.parse(await fs.readFile(await containedFile(directory,"content.json"),"utf8"));for(const a of saved.assets)if(a.status==="saved"&&a.path)await copyAsset(directory,a.path,stage);return saved;}
-  const input=parseContentLinks(manifest.sourceUrl)[0];const record:CapturedContent={platform:"wechat",nativeId:input?.nativeId??manifest.articleId,sourceUrl:manifest.sourceUrl,canonicalUrl:input?.canonicalUrl??manifest.sourceUrl,title:manifest.title,capturedAt:manifest.extractedAt,kind:"article",markdown:await fs.readFile(file,"utf8"),assets:[],warnings:[],coverage:{legacyArticleId:manifest.articleId}};
+  const input=parseContentLinks(manifest.sourceUrl)[0];const record:CapturedContent={platform:"wechat",nativeId:input?.nativeId??manifest.articleId,sourceUrl:manifest.sourceUrl,canonicalUrl:input?.canonicalUrl??manifest.sourceUrl,title:manifest.title,capturedAt:manifest.extractedAt,kind:"article",markdown:articleMarkdownBody(await fs.readFile(file,"utf8"),manifest),assets:[],warnings:[],coverage:{legacyArticleId:manifest.articleId}};
   for(const image of manifest.images??[]){const asset={id:`image-${image.index}`,role:"image" as const,status:image.status==="saved"?"saved" as const:"failed" as const,path:image.localPath,provenance:"original" as const};
     if(asset.path&&asset.status==="saved")try{await copyAsset(directory,asset.path,stage);}catch{asset.status="failed";}record.assets.push(asset);}
   for(const video of manifest.videos??[]){const asset={id:`video-${video.videoId??video.index}`,role:"video" as const,status:video.status==="saved"?"saved" as const:"unavailable" as const,path:video.localPath,reason:video.reason,provenance:"original" as const};

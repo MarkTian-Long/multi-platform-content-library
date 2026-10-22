@@ -30,7 +30,7 @@ export async function upgradeStorage(project:string,options:UpgradeOptions):Prom
   await ensureDirectory(options.backupDirectory);
   const backup=await fs.realpath(options.backupDirectory),journalFile=path.join(backup,"迁移日志.json");
   return withContentMaintenance(root,async()=>{
-    const entries=(await listManifests(root)).filter(e=>e.manifest.storageVersion!==2);
+    const entries=(await listManifests(root)).filter(e=>e.manifest.storageVersion!==2&&e.manifest.storageVersion!==3);
     if(!entries.length)return {items:0,journal:journalFile,snapshotsRemoved:0,originalsVerified:0,linkedFiles:0};
     if(await fs.stat(journalFile).then(()=>true,()=>false))throw new Error("已有整理日志，请先检查或回退，不能覆盖");
     const stage=path.join(backup,"准备区");await ensureDirectory(stage);const stagedRoot=path.join(stage,"资料库");await ensureDirectory(stagedRoot);await atomicJson(path.join(stagedRoot,".library-layout.json"),{version:2});

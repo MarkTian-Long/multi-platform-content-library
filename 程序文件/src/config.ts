@@ -7,7 +7,7 @@ export function resolveLibraryRoot(
   const configuredRoot = env.WECHAT_ARTICLE_LIBRARY_ROOT?.trim();
   return configuredRoot && path.isAbsolute(configuredRoot)
     ? path.resolve(configuredRoot)
-    : path.resolve(workspaceRoot, "..", "文章库");
+    : path.resolve(workspaceRoot, "..", "资料库");
 }
 
 export function resolveRuntimeRoot(

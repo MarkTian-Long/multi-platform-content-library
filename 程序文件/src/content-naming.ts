@@ -37,7 +37,16 @@ const platformName: Record<CapturedContent["platform"], string> = {
   wechat: "微信", wechat_channels: "微信视频号", xiaohongshu: "小红书", bilibili: "B站", youtube: "YouTube", douyin: "抖音", weibo: "微博", local: "本地文件", web: "网页"
 };
 
-export function contentFolderName(record: Pick<CapturedContent, "title" | "platform">, id: string): string {
+export function documentFileName(record:Pick<CapturedContent,"title">,extension:"md"|"html"|"pdf"):string{
+  return safeFilename(`${record.title}.${extension}`,`未命名资料.${extension}`,80);
+}
+
+export function contentFolderName(record: Pick<CapturedContent, "title" | "platform"> & Partial<Pick<CapturedContent,"storageVersion"|"capturedAt">>, id: string): string {
+  if(record.storageVersion===3){
+    const date=record.capturedAt?new Date(record.capturedAt):undefined;
+    const stamp=date&&!Number.isNaN(date.getTime())?new Intl.DateTimeFormat("sv-SE",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).format(date):"未标日期";
+    return `${stamp}_${platformName[record.platform]}_${safeFilename(record.title,"未命名资料",48)}`;
+  }
   const title = safeFilename(record.title, "未命名资料", 40);
   return `${platformName[record.platform]} - ${title} [${safeFilename(id.slice(0, 8), "资料").slice(0, 8)}]`;
 }
@@ -92,7 +101,7 @@ function readableLabel(asset: AssetWithCapturePath, record: CapturedContent): st
   const photo = originalPhotoNumber(asset, record);
   if (photo !== undefined) return `第${photo}张原图`;
   const part = partInfo(record, asset.partId).prefix;
-  const timing = asset.role === "frame" || asset.role === "ocr" ? ` ${timeName(asset.startMs)}` : "";
+  const timing = (asset.role === "frame" || asset.role === "ocr")&&(record.storageVersion!==3||asset.startMs!==undefined) ? ` ${timeName(asset.startMs)}` : "";
   const source = asset.provenance === "user_edited" ? " 用户校订" : asset.role === "subtitle" ? ` ${asset.provenance === "machine_asr" ? "机器" : "平台"}${asset.language ? ` ${asset.language}` : ""}` : "";
   return [part, `${roleName[asset.role]}${source}${timing}`].filter(Boolean).join(" · ");
 }
@@ -118,6 +127,21 @@ function legacyCandidatePath(asset: AssetWithCapturePath, record: CapturedConten
   return [category, part, filename].filter(Boolean).join("/");
 }
 function candidatePath(asset: AssetWithCapturePath, record: CapturedContent, capturePath: string, ordinal: number, pdfOrdinal: number): string {
+  if(record.storageVersion===3){
+    if(asset.path&&/^(?:历史版本|校订历史)\//.test(asset.path))return asset.path;
+    if(asset.id==="reading-pdf")return documentFileName(record,"pdf");
+    if(asset.id==="legacy-pdf")return "历史版本/阅读/原始文章.pdf";
+    const raw:Record<string,string>={"wechat-source-html":"原始页面.html","wechat-source-markdown":"采集正文.md","wechat-source-manifest":"采集清单.json"};
+    if(raw[asset.id])return `.内部/采集记录/${raw[asset.id]}`;
+    const extension=extensionFor(asset,capturePath),part=partInfo(record,asset.partId).directory;
+    const sequence=String(originalPhotoNumber(asset,record)??ordinal).padStart(3,"0");
+    if(asset.role==="image")return ["图片",part,`${sequence}${extension}`].filter(Boolean).join("/");
+    if(asset.role==="cover")return ["图片",part,`封面${String(ordinal).padStart(3,"0")}${extension}`].filter(Boolean).join("/");
+    if(asset.role==="ocr"&&asset.startMs===undefined)return ["处理结果","图片文字",part,`${sequence}${extension}`].filter(Boolean).join("/");
+    const relative=legacyCandidatePath(asset,record,capturePath,ordinal,pdfOrdinal);
+    if(asset.role==="source"||asset.role==="reading")return `.内部/${relative}`;
+    return asset.provenance==="original"||asset.provenance==="platform_subtitle"?relative:`处理结果/${relative}`;
+  }
   if(record.storageVersion!==2)return legacyCandidatePath(asset,record,capturePath,ordinal,pdfOrdinal);
   if(asset.id.startsWith("original-history-")&&asset.path?.startsWith("历史版本/原件/"))return asset.path;
   if(asset.id.startsWith("pdf-history-")&&asset.path?.startsWith("历史版本/阅读/"))return asset.path;
@@ -163,6 +187,7 @@ export function planAssetNames(record: CapturedContent, previous: ContentAsset[]
     if (capturePath) asset.capturePath = capturePath;
     if (asset.status !== "saved" || !capturePath) { delete asset.path; return asset; }
     asset.label = readableLabel(asset, record);
+    if(record.storageVersion===3&&asset.id==="reading-pdf"){asset.path=documentFileName(record,"pdf");byCapturePath.set(capturePath,asset.path);used.add(asset.path.toLocaleLowerCase());return asset;}
     if (previousAsset?.path && fileExtension(previousAsset.path).toLowerCase()===extensionFor(asset,capturePath).toLowerCase()) { asset.path = previousAsset.path; byCapturePath.set(capturePath, asset.path); used.add(asset.path.toLocaleLowerCase()); return asset; }
     const reused = byCapturePath.get(capturePath);
     asset.path = reused ?? distinctPath(candidatePath(asset, record, capturePath, ordinal, pdfOrdinal), used);

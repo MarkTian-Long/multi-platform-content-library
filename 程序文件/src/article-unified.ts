@@ -7,16 +7,12 @@ import type { CapturedContent, ContentAsset, ContentManifest } from "./content-t
 import { parseContentLinks } from "./content-input.js";
 import { saveContent, contentDirectory, containedFile, writableFile, atomicJson, ensureDirectory, fileHash, listManifests } from "./content-library.js";
 import { selectReadingPdf } from "./content-reading.js";
+import { articleMarkdownBody } from "./markdown.js";
+import { resolveUnifiedArticleRoot } from "./article-root.js";
 
 /** A narrow, explicit sibling mapping. No arbitrary redirect or directory links. */
 export async function unifiedArticleRoot(root:string):Promise<string|undefined>{
-  const marker=path.join(root,".unified-library.json");
-  const stat=await fs.lstat(marker).catch(error=>{if(error.code==="ENOENT")return undefined;throw error;});
-  if(!stat)return undefined;
-  if(stat.isSymbolicLink()||!stat.isFile()||stat.size>4096)throw new Error("统一资料库映射无效");
-  const value=JSON.parse(await fs.readFile(await containedFile(root,".unified-library.json"),"utf8"));
-  if(value.version!==1||value.contentRoot!=="../资料库")throw new Error("统一资料库映射必须指向同项目资料库");
-  const target=path.resolve(root,"..","资料库");await ensureDirectory(target);return target;
+  return resolveUnifiedArticleRoot(root);
 }
 export async function unifiedArticleRecords(root:string):Promise<Array<{directory:string;manifest:ArticleManifest}>>{
   const target=await unifiedArticleRoot(root);if(!target)return [];
@@ -40,7 +36,7 @@ export async function saveUnifiedArticle(root:string,record:ArticleRecord,option
   for(const image of raw.images??[])assets.push({id:`image-${image.index}`,role:"image",status:image.status==="saved"?"saved":"failed",path:image.localPath,sourceUrl:image.sourceUrl,provenance:"original"});
   for(const video of raw.videos??[])assets.push({id:`video-${video.videoId??video.index}`,role:"video",status:video.status==="saved"?"saved":"unavailable",path:video.localPath,reason:video.reason,provenance:"original"});
   assets.push({id:"wechat-source-html",role:"source",status:"saved",path:"source.html",provenance:"original"},{id:"wechat-source-markdown",role:"source",status:"saved",path:raw.markdownFile!,provenance:"original"},{id:"wechat-source-manifest",role:"source",status:"saved",path:"manifest.json",provenance:"original"});
-  const content:CapturedContent={platform:"wechat",nativeId:input?.nativeId??raw.articleId,canonicalUrl:input?.canonicalUrl??raw.sourceUrl,sourceUrl:raw.sourceUrl,title:raw.title,capturedAt:raw.extractedAt,kind:"article",markdown:await fs.readFile(await containedFile(captured.directory,raw.markdownFile!),"utf8"),assets,warnings:[],coverage:{legacyArticleId:raw.articleId},storageVersion:2};
+  const content:CapturedContent={platform:"wechat",nativeId:input?.nativeId??raw.articleId,canonicalUrl:input?.canonicalUrl??raw.sourceUrl,sourceUrl:raw.sourceUrl,title:raw.title,author:record.author,publishedAt:record.publishedAt,capturedAt:raw.extractedAt,kind:"article",markdown:articleMarkdownBody(await fs.readFile(await containedFile(captured.directory,raw.markdownFile!),"utf8"),raw),assets,warnings:[],coverage:{legacyArticleId:raw.articleId},storageVersion:2};
   const saved=await saveContent(root,content,captured.directory),directory=await contentDirectory(root,saved.contentId);
   const prior=await fs.readFile(path.join(directory,"manifest.json"),"utf8").then(s=>JSON.parse(s) as ArticleManifest,()=>undefined);
   const asset=(id:string)=>saved.assets.find(a=>a.id===id),pdf=selectReadingPdf(saved.assets);
@@ -68,8 +64,8 @@ export async function syncUnifiedArticleManifest(directory:string,article:Articl
 /** Keep the previous readable PDF before any regeneration replaces its filename. */
 export async function preserveCurrentPdf(directory:string):Promise<void>{
   const current=JSON.parse(await fs.readFile(await containedFile(directory,"content.json"),"utf8")) as ContentManifest;
-  if(current.storageVersion!==2)return;
-  const pdf=selectReadingPdf(current.assets);if(!pdf?.path||pdf.path.replaceAll("\\","/")!=="阅读.pdf")return;
+  if(current.storageVersion!==2&&current.storageVersion!==3)return;
+  const pdf=selectReadingPdf(current.assets);if(!pdf?.path||pdf.path.replaceAll("\\","/").startsWith("历史版本/"))return;
   const source=await containedFile(directory,pdf.path),sha=await fileHash(source),bytes=(await fs.stat(source)).size;
   if(!bytes||(pdf.sha256&&pdf.sha256!==sha)||(pdf.bytes&&pdf.bytes!==bytes))throw new Error("当前PDF已在程序外改变，请核对后再生成");
   const relative=`历史版本/阅读/阅读-${sha.slice(0,16)}.pdf`,target=await writableFile(directory,relative);

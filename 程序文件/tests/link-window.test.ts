@@ -123,12 +123,12 @@ test('多平台资料库窗口通过参数数组启动 link-cli，并把工作�
   assert.match(window, /Value\s*=\s*'bilibili'/);
 });
 
-test('窗口包含队列、搜索、平台过滤、任务动作和逐项产物状态的可验证控件', () => {
+test('窗口包含队列、搜索、平台过滤、任务动作、全文入口和资源摘要的可验证控件', () => {
   const window = fs.readFileSync(path.join(programRoot, 'link-window.ps1'), 'utf8');
   for (const label of [
     '加入队列', '开始保存', '取消任务', '重试任务', '全文搜索', '平台',
     '打开阅读页', '打开 PDF', '打开视频', '打开目录', '打开来源', '导出资料包',
-    '依赖检查', '安装到应用目录', '专用浏览器登录', '产物状态'
+    '依赖检查', '安装到应用目录', '专用浏览器登录', '个资源', '管理资料', '校订识别稿 / 转写稿'
   ]) assert.match(window, new RegExp(label));
   for (const command of ['enqueue', 'work', 'cancel', 'retry', 'list', 'export', 'doctor', 'login']) {
     assert.match(window, new RegExp("'" + command + "'|\"" + command + "\""));
@@ -137,6 +137,9 @@ test('窗口包含队列、搜索、平台过滤、任务动作和逐项产物�
   assert.match(window, /installButton\.Enabled\s*=\s*-not\s+\$busy\s+-and\s+-not\s+\$workerBusy/);
   assert.match(window, /\[IO\.Path\]::IsPathRooted\(\$relative\)/);
   assert.match(window, /\$searchBox\.Parent\s*=\s*\$libraryGroup/);
+  assert.match(window, /\$openTranscriptButton\.Enabled\s*=.*selectedItem\.textPath/);
+  assert.match(window, /'transcript'\s*\{\s*\[string\]\$item\.textPath\s*\}/);
+  assert.match(window, /\$editTranscriptButton\.Enabled\s*=.*selectedItem\.transcriptPath/);
 });
 
 test('PowerShell 5.1 离屏控件和进程测试通过', { skip: process.platform !== 'win32' }, () => {

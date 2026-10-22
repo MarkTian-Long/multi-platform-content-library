@@ -1,8 +1,8 @@
 # 程序与开发说明
 
-当前存储树及恢复说明见[存储目录说明](docs/storage-layout.md)，746项回归与真实资料核验见[存储验收](docs/reviews/2026-10-16-storage-unification.md)。
+当前存储树及恢复说明见[存储目录说明](docs/storage-layout.md)，本轮单库整理与验收见[执行记录](docs/plans/2026-10-21-single-library-and-readable-files.md)。2026-10-16的746项回归与真实资料核验保留在[历史存储验收](docs/reviews/2026-10-16-storage-unification.md)。
 
-用户入口在项目根[README](../README.md)。代码、脚本、测试和开发文档集中在本目录，正式资料放在根目录`资料库/`，旧微信资料放在`文章库/`。完整结构见[目录规范](docs/directory-conventions.md)。
+用户入口在项目根[README](../README.md)。代码、脚本、测试和开发文档集中在本目录，新旧接口的正式资料均放在根目录`资料库/`，原微信库归入`版本备份/单库整理-20261021/旧文章库/`。完整结构见[目录规范](docs/directory-conventions.md)。
 
 ## 安装与验证
 

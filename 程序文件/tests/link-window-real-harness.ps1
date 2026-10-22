@@ -92,12 +92,12 @@ try {
   $libraryList.SelectedIndex = $fixtureIndex
   [Windows.Forms.ListBox].GetMethod('OnSelectedIndexChanged', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($libraryList, @([EventArgs]::Empty)) | Out-Null
   Wait-WindowOperation
-  Assert-Window ($assetStatusLabel.Text -match '封面：已保存') ('选中资料没有通过真实 read 显示素材状态：' + $assetStatusLabel.Text + '；状态=' + $status.Text)
+  Assert-Window ($assetStatusLabel.Text -match '\d+ 个资源 · 已保存 \d+' -and $assetStatusLabel.Text -match '图片 1') ('选中资料没有通过真实 read 显示素材汇总：' + $assetStatusLabel.Text + '；状态=' + $status.Text)
   $platformCombo.SelectedIndex = 1
   Refresh-LinkLibrary
   Wait-WindowOperation
   Assert-Window ($libraryList.Items.Count -eq 1 -and $libraryList.Items[0].Text -match '微信公众号') '真实平台筛选失败'
-  [Windows.Forms.Button].GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($exportButton, @([EventArgs]::Empty)) | Out-Null
+  $exportButton.PerformClick()
   Wait-WindowOperation
   Assert-Window ($status.Text -match '导出|资料包') '真实 export 没有返回结果'
 
@@ -114,5 +114,10 @@ try {
   if ($form) { $form.Dispose() }
   if ($oldContentRoot) { $env:CONTENT_LIBRARY_ROOT = $oldContentRoot } else { Remove-Item Env:CONTENT_LIBRARY_ROOT -ErrorAction SilentlyContinue }
   if ($oldLegacyRoot) { $env:WECHAT_ARTICLE_LIBRARY_ROOT = $oldLegacyRoot } else { Remove-Item Env:WECHAT_ARTICLE_LIBRARY_ROOT -ErrorAction SilentlyContinue }
-  if (Test-Path -LiteralPath $runRoot) { Remove-Item -LiteralPath $runRoot -Recurse -Force }
+  if (Test-Path -LiteralPath $runRoot) {
+    $resolvedRunRoot = (Resolve-Path -LiteralPath $runRoot).ProviderPath
+    $acceptancePrefix = [IO.Path]::GetFullPath($acceptanceRoot).TrimEnd('\') + '\'
+    if (-not $resolvedRunRoot.StartsWith($acceptancePrefix, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolvedRunRoot) -notlike 'real-*') { throw '拒绝清理窗口验收目录以外的路径。' }
+    Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force
+  }
 }

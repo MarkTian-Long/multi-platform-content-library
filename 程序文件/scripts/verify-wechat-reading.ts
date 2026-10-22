@@ -1,0 +1,57 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import {pathToFileURL} from "node:url";
+import assert from "node:assert/strict";
+import * as cheerio from "cheerio";
+import {chromium} from "playwright-core";
+import {articleMarkdownBody} from "../src/markdown.js";
+import {contentDirectory,containedFile,fileHash,saveContent} from "../src/content-library.js";
+import {generateContentPdf} from "../src/content-service.js";
+import {resolveEdgeExecutable} from "../src/url-policy.js";
+import type {ContentManifest} from "../src/content-types.js";
+
+// Always operates on an isolated copy. Publishing a repaired current item is a separate maintenance operation.
+const project=await fs.realpath(path.resolve(process.argv[2]??"..")),id=process.argv[3];
+if(!/^[a-f0-9]{24}$/.test(id??""))throw new Error("请指定完整资料ID");
+const originalDirectory=await contentDirectory(path.join(project,"资料库"),id);
+const original:ContentManifest=JSON.parse(await fs.readFile(await containedFile(originalDirectory,"content.json"),"utf8"));
+if(original.platform!=="wechat")throw new Error("此核验仅适用于公众号文章");
+const output=path.join(project,"程序文件","logs","wechat-reading-repair",id);await fs.mkdir(output,{recursive:true});
+const candidateRoot=await fs.mkdtemp(path.join(output,"candidate-"));
+const sourceAsset=original.assets.find(a=>a.id==="wechat-source-html"&&a.status==="saved"&&a.path);
+if(!sourceAsset?.path)throw new Error("没有可恢复的公众号原始页面");
+const raw=await fs.readFile(await containedFile(originalDirectory,sourceAsset.path),"utf8"),$=cheerio.load(raw);
+$("#js_content").find("script,style,link,iframe,object,embed,form,input,button,textarea,select,noscript,svg,canvas,template,base,meta,video,mp-video,audio,source").remove();
+const normalized=(value:string)=>value.replace(/[\s\u200b\u2060\ufeff]/gu,"");
+const expectedText=normalized($("#js_content").text());
+const originals=original.assets.filter(a=>a.status==="saved"&&a.path&&a.provenance==="original");
+const hashes=await Promise.all(originals.map(async a=>({id:a.id,path:a.path!,sha256:await fileHash(await containedFile(originalDirectory,a.path!))})));
+for(const asset of originals)if(asset.sha256)assert.equal(hashes.find(h=>h.id===asset.id)!.sha256,asset.sha256,"source evidence must match its manifest");
+const {schemaVersion:_schema,...record}=original;
+const body=original.bodyFile?await fs.readFile(await containedFile(originalDirectory,original.bodyFile),"utf8"):original.markdown;
+record.markdown=articleMarkdownBody(body,{title:original.title,sourceUrl:original.sourceUrl,extractedAt:original.capturedAt});
+record.assets=record.assets.filter(a=>a.role!=="pdf"&&!a.id.startsWith("pdf-history-"));
+let saved=await saveContent(candidateRoot,record,originalDirectory),directory=await contentDirectory(candidateRoot,saved.contentId);
+const pdf=await generateContentPdf(directory);if(!pdf)throw new Error("未生成PDF");
+saved=await saveContent(candidateRoot,{...saved,assets:[...saved.assets,{id:"reading-pdf",role:"pdf",status:"saved",path:pdf,provenance:"generated"}]},directory);
+const requests:string[]=[],browser=await chromium.launch({executablePath:resolveEdgeExecutable(),headless:true});
+let readingText="",images:any[]=[],styledNodes=0;
+try{
+ const page=await browser.newPage({viewport:{width:1000,height:1080},javaScriptEnabled:false});
+ page.on("request",request=>{if(/^https?:/.test(request.url()))requests.push(request.url());});
+ await page.route(/^https?:\/\//,route=>route.abort());
+ await page.goto(pathToFileURL(await containedFile(directory,saved.readingFile)).href,{waitUntil:"load"});
+ await page.waitForFunction(()=>Array.from(document.images).every(image=>image.complete));
+ readingText=await page.locator("#js_content").innerText();
+ const domText=await page.locator("#js_content").textContent();assert.equal(normalized(domText??""),expectedText,"all original article text and its sequence must survive");
+ images=await page.locator("#js_content img").evaluateAll(nodes=>nodes.map(node=>{const image=node as HTMLImageElement;return{src:decodeURIComponent(image.getAttribute("src")??""),width:image.naturalWidth,height:image.naturalHeight,complete:image.complete};}));
+ styledNodes=await page.locator("#js_content [style]").count();
+ assert.equal(images.length,$("#js_content img").length);assert.ok(images.every(i=>i.complete&&i.width>0));assert.equal(requests.length,0);
+ assert.doesNotMatch(readingText,/source:|status:|captured:/);
+ await page.screenshot({path:path.join(output,"repaired-reading.png")});
+ await page.locator("#js_content").screenshot({path:path.join(output,"repaired-article.png")});
+}finally{await browser.close();}
+for(const hash of hashes)assert.equal(await fileHash(await containedFile(originalDirectory,hash.path)),hash.sha256,"original assets must remain unchanged");
+const report={contentId:id,candidateRoot,directory,pdf:path.join(directory,pdf),reading:path.join(directory,saved.readingFile),sourceTextCharacters:expectedText.length,readingTextCharacters:normalized(readingText).length,images,styledNodes,externalRequests:requests,originalsVerified:hashes.length,originalHashes:hashes,sourceManifestHash:await fileHash(path.join(originalDirectory,"content.json"))};
+await fs.writeFile(path.join(output,"verification.json"),JSON.stringify(report,null,2)+"\n");
+console.log(JSON.stringify({...report,originalHashes:undefined,images:images.length},null,2));
